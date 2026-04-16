@@ -82,6 +82,14 @@ class Daemon:
         # persistence side-effects via load_state()/save_state().
         self.state: DaemonState = DaemonState()
 
+        # Background merge worker. Merges can take up to validation_timeout_seconds
+        # (default 300s) and historically blocked the cycle thread. We now run them
+        # on a daemon Thread with a single-flight guard: at most one merge is in
+        # flight at a time, and result processing happens on the next cycle that
+        # observes the worker has finished.
+        self._merge_thread: "threading.Thread | None" = None
+        self._last_merge_result: "object | None" = None  # MergeResult, deferred import
+
         # Introspection scheduler — Phase 2 → Phase 3 integration. Gated on
         # config.introspection.enabled AND store availability: modes need a
         # store in their context, so without one we skip execution entirely.
@@ -479,12 +487,33 @@ class Daemon:
         )
 
     def _check_evolution(self) -> None:
-        """Check if evolution actions (merge) should run."""
+        """Check if evolution actions (merge) should run.
+
+        Merges run on a background thread so cycles never block on the
+        merge + validation pipeline (which can take minutes). State machine:
+
+        1. If a merge thread is alive, return immediately — single-flight.
+        2. If a merge thread finished since last cycle, process its result
+           (events, failure-task enqueue), then clear the slot.
+        3. If trainer.should_merge(), spawn a new background worker and return.
+        """
         if not self.config.evolution.enabled:
             return
 
         if self.store is None:
             return
+
+        # Step 1: previous merge still running — skip this cycle
+        if self._merge_thread is not None and self._merge_thread.is_alive():
+            return
+
+        # Step 2: previous merge finished — process its result
+        if self._merge_thread is not None and not self._merge_thread.is_alive():
+            try:
+                self._process_merge_result(self._last_merge_result)
+            finally:
+                self._merge_thread = None
+                self._last_merge_result = None
 
         # Lazy import to avoid circular dependencies
         from .trainer.manager import TrainingManager
@@ -493,53 +522,96 @@ class Daemon:
         builder = DatasetBuilder(self.config, self.store)
         trainer = TrainingManager(self.config, self.store, builder)
 
-        # Check if merge should run
+        # Step 3: maybe start a new merge
         if trainer.should_merge():
             self.store.append_event("evolution_merge_started", {"timestamp": utc_now()})
-            result = trainer.run_merge()
+            self._merge_thread = threading.Thread(
+                target=self._run_merge_in_thread,
+                args=(trainer,),
+                daemon=True,
+                name="merge-worker",
+            )
+            self._merge_thread.start()
 
-            if result.success:
-                self.store.append_event("evolution_merge_completed", {
-                    "merge_id": result.merge_manifest.merge_id if result.merge_manifest else None,
-                    "timestamp": utc_now(),
-                })
+    def _run_merge_in_thread(self, trainer: "TrainingManager") -> None:
+        """Background worker entry point: run the merge and stash the result.
+
+        Exceptions are captured into ``_last_merge_result`` as a synthetic
+        failure so the main cycle can react. We never let an unhandled
+        exception crash the worker silently.
+        """
+        try:
+            self._last_merge_result = trainer.run_merge()
+        except Exception as exc:  # noqa: BLE001 — surface ANY merge crash
+            from .trainer.manager import MergeResult
+            self._last_merge_result = MergeResult(
+                success=False,
+                merge_manifest=None,
+                error_message=f"merge worker crashed: {exc!r}",
+            )
+
+    def _process_merge_result(self, result: "object | None") -> None:
+        """Process a completed background merge result on the cycle thread.
+
+        Called on the cycle that observes the merge worker has finished.
+        Emits the appropriate event and, on failure, enqueues an
+        investigation task subject to the same persistence safety rules
+        as before.
+        """
+        if result is None or self.store is None:
+            return
+
+        if result.success:
+            self.store.append_event("evolution_merge_completed", {
+                "merge_id": result.merge_manifest.merge_id if result.merge_manifest else None,
+                "timestamp": utc_now(),
+            })
+            return
+
+        self.store.append_event("evolution_merge_failed", {
+            "error": result.error_message,
+            "timestamp": utc_now(),
+        })
+
+        # Check if we should generate a failure investigation task. We need
+        # a fresh trainer here because the previous one belongs to the
+        # background thread's stack frame.
+        from .trainer.manager import TrainingManager
+        from .dataset_builder.builder import DatasetBuilder
+
+        builder = DatasetBuilder(self.config, self.store)
+        trainer = TrainingManager(self.config, self.store, builder)
+
+        if trainer.should_generate_merge_failure_task():
+            from .task_generator.generator import TaskGenerator
+            from .models import TaskQueueEntry
+
+            generator = TaskGenerator(self.store)
+            task = generator.generate_merge_failure_task(
+                failure_count=trainer._get_consecutive_merge_failures(),
+                last_error=result.error_message,
+            )
+            # Add to task queue. Only reset the failure counter on
+            # successful enqueue — if persistence fails (disk full,
+            # permission, race), we must NOT zero the counter,
+            # otherwise the introspection trigger silently dies and
+            # the merge failure goes uninvestigated.
+            entry = TaskQueueEntry(
+                task_id=task.task_id,
+                task=task,
+                queued_at=utc_now(),
+                status="pending",
+            )
+            try:
+                self.store.append_to_queue(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to enqueue merge-failure investigation task: %s. "
+                    "Counter NOT reset; will retry next cycle.",
+                    exc,
+                )
             else:
-                self.store.append_event("evolution_merge_failed", {
-                    "error": result.error_message,
-                    "timestamp": utc_now(),
-                })
-
-                # Check if we should generate a failure investigation task
-                if trainer.should_generate_merge_failure_task():
-                    from .task_generator.generator import TaskGenerator
-                    from .models import TaskQueueEntry
-
-                    generator = TaskGenerator(self.store)
-                    task = generator.generate_merge_failure_task(
-                        failure_count=trainer._get_consecutive_merge_failures(),
-                        last_error=result.error_message,
-                    )
-                    # Add to task queue. Only reset the failure counter on
-                    # successful enqueue — if persistence fails (disk full,
-                    # permission, race), we must NOT zero the counter,
-                    # otherwise the introspection trigger silently dies and
-                    # the merge failure goes uninvestigated.
-                    entry = TaskQueueEntry(
-                        task_id=task.task_id,
-                        task=task,
-                        queued_at=utc_now(),
-                        status="pending",
-                    )
-                    try:
-                        self.store.append_to_queue(entry)
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to enqueue merge-failure investigation task: %s. "
-                            "Counter NOT reset; will retry next cycle.",
-                            exc,
-                        )
-                    else:
-                        trainer.reset_merge_failure_count()
+                trainer.reset_merge_failure_count()
 
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""

@@ -1217,6 +1217,12 @@ class CheckEvolutionIntegrationTests(unittest.TestCase):
                      return_value=MergeResult(success=True, merge_manifest=manifest),
                  ), \
                  patch.object(TrainingManager, "should_generate_merge_failure_task") as spawn:
+                # Cycle 1: kicks off background merge.
+                daemon._check_evolution()
+                # Wait for the background worker to finish, then run another
+                # cycle so the result is processed.
+                if daemon._merge_thread is not None:
+                    daemon._merge_thread.join(timeout=5.0)
                 daemon._check_evolution()
 
             # Success path must not even consider enqueuing a failure task.
@@ -1250,6 +1256,11 @@ class CheckEvolutionIntegrationTests(unittest.TestCase):
                  patch.object(
                      TrainingManager, "reset_merge_failure_count",
                  ) as reset:
+                # Cycle 1: kicks off background merge.
+                daemon._check_evolution()
+                if daemon._merge_thread is not None:
+                    daemon._merge_thread.join(timeout=5.0)
+                # Cycle 2: processes the failed result and enqueues the task.
                 daemon._check_evolution()
 
             # A merge-failure investigation task should now be on the
@@ -1307,10 +1318,106 @@ class CheckEvolutionIntegrationTests(unittest.TestCase):
                      side_effect=OSError("disk full"),
                  ):
                 # Should not raise — the daemon swallows the enqueue error.
+                # Cycle 1 starts the merge; cycle 2 processes the result.
+                daemon._check_evolution()
+                if daemon._merge_thread is not None:
+                    daemon._merge_thread.join(timeout=5.0)
                 daemon._check_evolution()
 
             # Counter must NOT have been reset.
             reset.assert_not_called()
+
+    def test_check_evolution_does_not_block_cycle(self) -> None:
+        """A long-running merge must not block the cycle thread.
+
+        Stub trainer.run_merge to sleep for several seconds; assert that
+        ``_check_evolution`` returns in well under the merge duration with
+        the merge worker still running in the background.
+        """
+        import time
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, _store = self._build_daemon(temp_path)
+
+            slow_duration = 3.0  # seconds the stubbed merge sleeps for
+
+            def slow_merge(self):  # noqa: ARG001 — bound method signature
+                time.sleep(slow_duration)
+                return MergeResult(success=True, merge_manifest=None)
+
+            try:
+                with patch.object(TrainingManager, "should_merge", return_value=True), \
+                     patch.object(TrainingManager, "run_merge", new=slow_merge):
+                    t0 = time.monotonic()
+                    daemon._check_evolution()
+                    elapsed = time.monotonic() - t0
+
+                # Cycle returned essentially instantly (well under merge duration).
+                self.assertLess(
+                    elapsed,
+                    1.0,
+                    f"_check_evolution blocked for {elapsed:.2f}s; "
+                    "merge should have been dispatched to a background thread",
+                )
+                # And the merge worker is still in flight.
+                self.assertIsNotNone(daemon._merge_thread)
+                self.assertTrue(daemon._merge_thread.is_alive())
+            finally:
+                if daemon._merge_thread is not None:
+                    daemon._merge_thread.join(timeout=slow_duration + 2.0)
+
+    def test_subsequent_cycle_processes_completed_merge_result(self) -> None:
+        """After a background merge finishes, the next cycle must process
+        the result (emit completion event, clear the worker slot).
+        """
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.models import MergeManifest
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            manifest = MergeManifest(
+                merge_id="merge-async-ok",
+                source_loras=["a"],
+                target_base="m",
+                merge_method="linear",
+            )
+
+            # Only the FIRST should_merge() call returns True; subsequent
+            # calls return False so cycle 2 processes the prior result and
+            # does NOT immediately spawn another merge.
+            sm_calls = {"n": 0}
+
+            def should_merge_once(self):  # noqa: ARG001
+                sm_calls["n"] += 1
+                return sm_calls["n"] == 1
+
+            with patch.object(TrainingManager, "should_merge", new=should_merge_once), \
+                 patch.object(
+                     TrainingManager, "run_merge",
+                     return_value=MergeResult(success=True, merge_manifest=manifest),
+                 ):
+                # Cycle 1: kick off background merge.
+                daemon._check_evolution()
+                self.assertIsNotNone(daemon._merge_thread)
+                daemon._merge_thread.join(timeout=5.0)
+                # Cycle 2: should process the completed result.
+                daemon._check_evolution()
+
+            # Worker slot is cleared.
+            self.assertIsNone(daemon._merge_thread)
+            self.assertIsNone(daemon._last_merge_result)
+            # Completion event was recorded.
+            events_path = store.traces_dir / "events.jsonl"
+            text = events_path.read_text(encoding="utf-8")
+            self.assertIn("evolution_merge_started", text)
+            self.assertIn("evolution_merge_completed", text)
+            self.assertIn("merge-async-ok", text)
 
 
 if __name__ == "__main__":
