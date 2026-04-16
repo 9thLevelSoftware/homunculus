@@ -1463,5 +1463,108 @@ class EvolutionStateResilienceTests(unittest.TestCase):
         )
 
 
+class LineageMultiBaseTests(unittest.TestCase):
+    """register_merge must aggregate parent_ids and episode_ids from ALL
+    source LoRAs, not just the first one found in cache.
+
+    Regression coverage for the inner ``break`` in the parent-aggregation
+    loop that collapsed multi-source merges down to the first source's
+    grandparents only.
+    """
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.store = MagicMock()
+        self.lineage_records: list = []
+
+        def mock_append(record):
+            self.lineage_records.append(record)
+
+        self.store.append_lineage = mock_append
+        self.store.load_lineage = lambda: list(self.lineage_records)
+
+    def _make_tracker(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        return LineageTracker(self.config, self.store)
+
+    def _make_lora(self, candidate_id: str, base_model: str) -> AdapterManifest:
+        return AdapterManifest(
+            model_id=base_model,
+            base_model=base_model,
+            adapter_path=f"/tmp/{candidate_id}",
+            dataset_snapshot=f"snap-{candidate_id}",
+            snapshot_path=None,
+            trainer="mlx-lm",
+            metrics={},
+            status="trained",
+            created_at="2024-01-01",
+            candidate_id=candidate_id,
+        )
+
+    def test_register_merge_aggregates_parents_from_all_sources(self):
+        tracker = self._make_tracker()
+
+        # Two LoRAs from DIFFERENT base models with disjoint episode sets.
+        tracker.register_lora(
+            self._make_lora("L1", "B1"), episode_ids=["ep1", "ep2"]
+        )
+        tracker.register_lora(
+            self._make_lora("L2", "B2"), episode_ids=["ep3"]
+        )
+
+        merge = MergeManifest(
+            merge_id="M1",
+            source_loras=["L1", "L2"],
+            target_base="B1",
+            merge_method="linear",
+            output_path="/tmp/M1",
+        )
+        record = tracker.register_merge(merge, output_model_id="merged-gen2")
+
+        # Both source LoRAs must appear as parents.
+        self.assertIn("L1", record.parent_ids)
+        self.assertIn("L2", record.parent_ids)
+        # Both bases must appear as grandparents — the bug dropped B2.
+        self.assertIn("base-B1", record.parent_ids)
+        self.assertIn(
+            "base-B2",
+            record.parent_ids,
+            "base-B2 is missing — the inner break dropped non-first sources' bases",
+        )
+        # Episodes from BOTH LoRAs must aggregate.
+        self.assertIn("ep1", record.episode_ids)
+        self.assertIn("ep2", record.episode_ids)
+        self.assertIn("ep3", record.episode_ids)
+        # Generation increments above the max source generation.
+        self.assertEqual(record.generation, 1)
+
+    def test_register_merge_dedups_shared_base_across_sources(self):
+        tracker = self._make_tracker()
+
+        tracker.register_lora(
+            self._make_lora("L1", "B-shared"), episode_ids=["ep1"]
+        )
+        tracker.register_lora(
+            self._make_lora("L2", "B-shared"), episode_ids=["ep2"]
+        )
+
+        merge = MergeManifest(
+            merge_id="M2",
+            source_loras=["L1", "L2"],
+            target_base="B-shared",
+            merge_method="linear",
+            output_path="/tmp/M2",
+        )
+        record = tracker.register_merge(merge, output_model_id="merged-shared")
+
+        # Both LoRAs are parents, shared base appears exactly once.
+        self.assertEqual(record.parent_ids.count("L1"), 1)
+        self.assertEqual(record.parent_ids.count("L2"), 1)
+        self.assertEqual(record.parent_ids.count("base-B-shared"), 1)
+        self.assertIn("ep1", record.episode_ids)
+        self.assertIn("ep2", record.episode_ids)
+
+
 if __name__ == "__main__":
     unittest.main()

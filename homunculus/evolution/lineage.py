@@ -123,34 +123,41 @@ class LineageTracker:
         """
         cache = self._load_cache()
 
-        # Collect parent information
-        parent_ids = []
-        all_episode_ids: set[str] = set()
+        # Aggregate parents and episodes from EVERY source LoRA, not just the
+        # first. Use sets to deduplicate; convert back to sorted lists for
+        # stable, reproducible serialization.
+        parent_set: set[str] = set()
+        episode_set: set[str] = set()
         max_generation = 0
 
         for lora_id in merge_manifest.source_loras:
-            if lora_id in cache:
-                parent = cache[lora_id]
-                parent_ids.append(parent.record_id)
-                all_episode_ids.update(parent.episode_ids)
-                max_generation = max(max_generation, parent.generation)
+            cached = cache.get(lora_id)
+            if cached is None:
+                # Source LoRA was not registered in lineage prior to merge.
+                # We still record it as a parent edge so the merge node is
+                # traceable, but cannot recover its episodes or grandparents.
+                parent_set.add(lora_id)
+                continue
+            # The LoRA itself is a direct parent of the merge.
+            parent_set.add(cached.record_id)
+            # Aggregate the LoRA's own parents (typically its base model) so
+            # that multi-base merges retain edges to every contributing base.
+            parent_set.update(cached.parent_ids)
+            episode_set.update(cached.episode_ids)
+            max_generation = max(max_generation, cached.generation)
 
-        # Also include the base model as a parent
-        # Get base from first LoRA's parent
-        for lora_id in merge_manifest.source_loras:
-            if lora_id in cache:
-                lora_record = cache[lora_id]
-                for pid in lora_record.parent_ids:
-                    if pid not in parent_ids:
-                        parent_ids.append(pid)
-                break
+        # Always link the merge to the declared target base, covering the
+        # single-base case where the target may not be any source's base
+        # and ensuring the merged generation is reachable from the new base.
+        if merge_manifest.target_base:
+            parent_set.add(f"base-{merge_manifest.target_base}")
 
         record = LineageRecord(
             record_id=merge_manifest.merge_id,
             record_type="merged",
             model_id=output_model_id,
-            parent_ids=parent_ids,
-            episode_ids=sorted(all_episode_ids),
+            parent_ids=sorted(parent_set),
+            episode_ids=sorted(episode_set),
             merge_id=merge_manifest.merge_id,
             generation=max_generation + 1,  # Increment generation
             metadata={
