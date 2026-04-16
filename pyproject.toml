@@ -15,12 +15,6 @@ homunculus = "homunculus.cli:main"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = [
-  "homunculus",
-  "homunculus.orchestrator",
-  "homunculus.memory_client",
-  "homunculus.task_runner",
-  "homunculus.dataset_builder",
-  "homunculus.trainer",
-]
+[tool.setuptools.packages.find]
+include = ["homunculus*"]
+exclude = ["tests*"]
