@@ -416,6 +416,43 @@ High priority task
             # Tasks should be sorted by priority (highest first)
             self.assertGreaterEqual(tasks[0].priority, tasks[1].priority)
 
+    def test_daemon_run_once_returns_error_on_orchestrator_exception(self) -> None:
+        """Test that DaemonCycleResult has status='error' when orchestrator raises."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+
+            # Create a suggestion so there's a task to execute
+            suggestions_dir = temp_path / "suggestions"
+            suggestions_dir.mkdir()
+            (suggestions_dir / "test-task.md").write_text("""# Test Task
+
+## Priority
+HIGH
+
+## What
+Test task that will fail
+""", encoding="utf-8")
+
+            # Create a mock orchestrator that raises an exception
+            class FailingOrchestrator:
+                def run_episode(self, task_request: object) -> object:
+                    raise RuntimeError("Simulated orchestrator failure")
+
+            failing_orchestrator = FailingOrchestrator()
+            daemon = Daemon(
+                config,
+                orchestrator=failing_orchestrator,  # type: ignore
+                suggestions_dir=suggestions_dir,
+            )
+
+            result = daemon.run_once()
+
+            self.assertEqual(result.status, "error")
+            self.assertIsNotNone(result.error)
+            self.assertIn("Simulated orchestrator failure", result.error)
+
 
 if __name__ == "__main__":
     unittest.main()

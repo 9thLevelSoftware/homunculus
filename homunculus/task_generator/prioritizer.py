@@ -75,10 +75,11 @@ class TaskPrioritizer:
         if not tasks:
             return []
 
-        deduplicated = self._deduplicate(tasks)
-
-        for task in deduplicated:
+        # Calculate priorities first, then deduplicate (keeps higher priority duplicate)
+        for task in tasks:
             task.priority = self._calculate_final_priority(task, introspection_results)
+
+        deduplicated = self._deduplicate(tasks)
 
         # Sort by priority desc, then created_at asc (FIFO tiebreaker)
         deduplicated.sort(key=lambda t: (-t.priority, t.created_at))
@@ -208,7 +209,12 @@ class TaskPrioritizer:
         seen: dict[str, GeneratedTask] = {}
 
         for task in tasks:
-            key = task.prompt[:100].lower().strip() if task.prompt else task.task_id
+            # Handle None, empty, and whitespace-only prompts by falling back to task_id
+            key = (
+                task.prompt[:100].lower().strip()
+                if task.prompt and task.prompt.strip()
+                else task.task_id
+            )
             if key not in seen or task.priority > seen[key].priority:
                 seen[key] = task
 

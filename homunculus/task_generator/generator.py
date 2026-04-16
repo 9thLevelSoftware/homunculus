@@ -467,8 +467,8 @@ class TaskGenerator:
         elif finding_type == "low_coverage_files":
             files = self._extract_finding_field(finding, "files", [])
             if files:
-                # Take top 3 lowest coverage files
-                target_files = [f["file"] for f in files[:3]]
+                # Take top 3 lowest coverage files (defensive access for malformed findings)
+                target_files = [f.get("file", "unknown") for f in files[:3] if f.get("file")]
                 return GeneratedTask(
                     task_id=self._make_task_id(),
                     source="introspection",
@@ -732,7 +732,9 @@ Total test coverage reaches at least 70%."""
     ) -> str:
         """Format prompt for low coverage files finding."""
         file_list = "\n".join(
-            f"- {f['file']}: {f['percent']:.0f}% coverage" for f in files
+            f"- {f.get('file', 'unknown')}: {f.get('percent', 0):.0f}% coverage"
+            for f in files
+            if f.get("file")
         )
 
         return f"""# Improve File Coverage
@@ -753,7 +755,9 @@ Coverage for these files exceeds 50%."""
         """Format prompt for high TODO count finding."""
         breakdown_str = ", ".join(f"{k}: {v}" for k, v in breakdown.items() if v > 0)
         sample_list = "\n".join(
-            f"- {t['file']}:{t['line']} - {t['text']}" for t in todos[:5]
+            f"- {t.get('file', 'unknown')}:{t.get('line', '?')} - {t.get('text', '')}"
+            for t in todos[:5]
+            if t.get("file")
         )
 
         return f"""# Address TODOs

@@ -135,7 +135,10 @@ class SuggestionReader:
         total_weight = 0.0
 
         for i, result in enumerate(introspection_results):
-            weight = max(0.4, 1.0 - (i * 0.2))  # Decay from 1.0 to 0.4
+            # Smooth exponential decay: 0.4 + 0.6 * (0.8 ** i)
+            # i=0: 1.0, i=1: 0.88, i=2: 0.784, i=3: 0.707, ...
+            # Asymptotes to 0.4 smoothly
+            weight = 0.4 + 0.6 * (0.8 ** i)
 
             result_keywords: set[str] = set()
             for rec in result.recommendations:

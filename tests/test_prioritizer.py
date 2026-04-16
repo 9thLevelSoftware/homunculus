@@ -130,35 +130,42 @@ class TestPrioritizerSorting(unittest.TestCase):
         self.assertEqual(result[1].task_id, "low")
 
     def test_fifo_tiebreaker_older_first(self) -> None:
-        """Test that ties are broken by created_at (older first, FIFO)."""
-        prioritizer = TaskPrioritizer()
+        """Test that ties are broken by created_at (older first, FIFO).
 
-        # Create tasks with same priority but different timestamps and unique prompts
+        To test the FIFO tiebreaker, we need two tasks with identical calculated
+        priority. Since priority depends on alignment, complexity, and freshness,
+        we use a custom prioritizer with freshness weight=0 so that timestamp
+        differences don't affect priority, only the tiebreaker.
+        """
+        # Zero out freshness weight so only alignment and complexity matter
+        weights = PriorityWeights(alignment=0.5, complexity=0.5, freshness=0.0)
+        prioritizer = TaskPrioritizer(weights)
+
+        # Same source (same alignment), same prompt length (same complexity)
+        # Different timestamps to test FIFO tiebreaker
         now = datetime.now(timezone.utc)
         older = _make_task(
             task_id="older",
             source="user",
             priority=0.5,
-            prompt="Older task that was created first",
+            prompt="x" * 100,  # Same length
             created_at=(now - timedelta(hours=1)).isoformat(),
         )
         newer = _make_task(
             task_id="newer",
             source="user",
             priority=0.5,
-            prompt="Newer task that was created second",
+            prompt="y" * 100,  # Same length, different content to avoid dedup
             created_at=now.isoformat(),
         )
 
-        # Even with same calculated priority, older should come first
         result = prioritizer.prioritize([newer, older])
 
         self.assertEqual(len(result), 2)
-        # Note: Due to freshness scoring, newer will have higher priority
-        # So FIFO tiebreaker only applies when priorities are actually equal
-        # Let's verify that both tasks are present
-        task_ids = {t.task_id for t in result}
-        self.assertEqual(task_ids, {"older", "newer"})
+        # Both have identical calculated priority, so FIFO tiebreaker applies
+        # Older task should come first
+        self.assertEqual(result[0].task_id, "older")
+        self.assertEqual(result[1].task_id, "newer")
 
     def test_priority_overrides_age(self) -> None:
         """Test that higher priority beats older age."""
@@ -242,6 +249,34 @@ class TestDeduplication(unittest.TestCase):
         result = prioritizer.prioritize([task1, task2])
 
         self.assertEqual(len(result), 1)
+
+    def test_whitespace_only_prompts_not_deduplicated(self) -> None:
+        """Test that whitespace-only prompts are treated as unique by task_id."""
+        prioritizer = TaskPrioritizer()
+
+        # Both have whitespace-only prompts, but different task_ids
+        # They should NOT be deduplicated because they fall back to task_id
+        task1 = _make_task(task_id="task-1", prompt="   ")
+        task2 = _make_task(task_id="task-2", prompt="  \t\n  ")
+
+        result = prioritizer.prioritize([task1, task2])
+
+        # Both should be present since they have different task_ids
+        self.assertEqual(len(result), 2)
+        task_ids = {t.task_id for t in result}
+        self.assertEqual(task_ids, {"task-1", "task-2"})
+
+    def test_empty_prompt_falls_back_to_task_id(self) -> None:
+        """Test that empty prompt uses task_id for deduplication key."""
+        prioritizer = TaskPrioritizer()
+
+        task1 = _make_task(task_id="task-1", prompt="")
+        task2 = _make_task(task_id="task-2", prompt="")
+
+        result = prioritizer.prioritize([task1, task2])
+
+        # Both should be present since they have different task_ids
+        self.assertEqual(len(result), 2)
 
 
 class TestAlignmentScoring(unittest.TestCase):
