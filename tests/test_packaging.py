@@ -62,5 +62,19 @@ class GitignoreTests(unittest.TestCase):
                               f".gitignore is missing required pattern: {pattern}")
 
 
+class ExampleConfigCoverageTests(unittest.TestCase):
+    """Verify documented dataclass fields appear in the example config."""
+
+    def test_daemon_section_includes_target_workspace(self):
+        root = Path(__file__).resolve().parent.parent
+        with (root / "homunculus.example.toml").open("rb") as fh:
+            cfg = tomllib.load(fh)
+        daemon = cfg.get("daemon", {})
+        self.assertIn(
+            "target_workspace", daemon,
+            "DaemonSettings.target_workspace must be documented in homunculus.example.toml",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

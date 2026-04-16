@@ -60,6 +60,7 @@ enabled = true
 cycle_interval_minutes = 480
 max_episodes_per_cycle = 5
 suggestions_dir = "suggestions"
+target_workspace = "self"
 
 [introspection]
 enabled = true
