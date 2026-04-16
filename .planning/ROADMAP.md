@@ -200,6 +200,6 @@
 | Phase 1: Daemon | 3 | 3 | Complete |
 | Phase 2: Introspection | 5 | 5 | Complete |
 | Phase 3: Task Generation | 4 | 4 | Complete |
-| Phase 4: Weight Evolution | 4 | 4 | Complete |
+| Phase 4: Weight Evolution | 4 | 4 | Complete (reviewed — see `.planning/phases/04-weight-evolution/04-REVIEW.md`) |
 | Phase 5: Full Autonomy | 1-2 | 0 | Not started |
 | **Total** | **18-19** | **17** | **~94% complete** |

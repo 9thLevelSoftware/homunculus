@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
+
+
+def _warn_on_unknown_keys(section: str, raw: dict, known: set[str]) -> None:
+    """Emit a UserWarning for [section] keys not in the known set.
+
+    Helps surface config drift without breaking existing TOML files.
+    """
+    unknown = set(raw.keys()) - known
+    if unknown:
+        warnings.warn(
+            f"[{section}] config contains unknown keys: {sorted(unknown)} "
+            "(silently ignored)",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 @dataclass
@@ -95,6 +111,7 @@ class DaemonSettings:
     max_episodes_per_cycle: int = 5
     suggestions_dir: str = "suggestions"
     target_workspace: str = "self"
+    auto_commit_on_accept: bool = True
 
 
 @dataclass
@@ -112,13 +129,15 @@ class IntrospectionSettings:
 
 @dataclass
 class EvolutionSettings:
-    """Settings for weight evolution (LoRA merging)."""
-
     enabled: bool = True
-    merge_after_loras: int = 3  # Merge after N promoted LoRAs
-    max_merge_attempts: int = 3  # Generate introspection task after N failures
+    auto_promote: bool = True
+    auto_apply: bool = True
+    auto_train_after_samples: int = 50
+    auto_merge_after_loras: int = 5
+    rollback_on_degradation: bool = True
+    max_merge_attempts: int = 3
     validation_timeout_seconds: int = 300
-    coherence_prompt: str = "Explain what you are and what you do."
+    coherence_prompt: str = "Write a Python function that returns the nth Fibonacci number."
     coherence_min_tokens: int = 50
     merge_backend: str = "auto"  # "auto" | "mergekit" | "mlx"
 
@@ -251,13 +270,29 @@ def load_config(path: str | Path) -> HomunculusConfig:
     evolution_raw = raw.get("evolution", {})
     evolution = EvolutionSettings(
         enabled=evolution_raw.get("enabled", True),
-        merge_after_loras=evolution_raw.get("merge_after_loras", 3),
+        auto_promote=evolution_raw.get("auto_promote", True),
+        auto_apply=evolution_raw.get("auto_apply", True),
+        auto_train_after_samples=evolution_raw.get("auto_train_after_samples", 50),
+        auto_merge_after_loras=evolution_raw.get(
+            "auto_merge_after_loras",
+            evolution_raw.get("merge_after_loras", 5),  # back-compat alias
+        ),
+        rollback_on_degradation=evolution_raw.get("rollback_on_degradation", True),
         max_merge_attempts=evolution_raw.get("max_merge_attempts", 3),
         validation_timeout_seconds=evolution_raw.get("validation_timeout_seconds", 300),
-        coherence_prompt=evolution_raw.get("coherence_prompt", "Explain what you are and what you do."),
+        coherence_prompt=evolution_raw.get(
+            "coherence_prompt",
+            "Write a Python function that returns the nth Fibonacci number.",
+        ),
         coherence_min_tokens=evolution_raw.get("coherence_min_tokens", 50),
         merge_backend=evolution_raw.get("merge_backend", "auto"),
     )
+    _warn_on_unknown_keys("evolution", evolution_raw, {
+        "enabled", "auto_promote", "auto_apply", "auto_train_after_samples",
+        "auto_merge_after_loras", "merge_after_loras", "rollback_on_degradation",
+        "max_merge_attempts", "validation_timeout_seconds", "coherence_prompt",
+        "coherence_min_tokens", "merge_backend",
+    })
 
     return HomunculusConfig(
         teacher=TeacherSettings(**raw["teacher"]),

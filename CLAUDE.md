@@ -59,21 +59,27 @@ python -m homunculus.cli train-sft --config homunculus.toml --simulate
 - `homunculus/task_runner/runner.py` - Git worktree isolation, patch application, verification
 - `homunculus/memory_client/engram.py` - Engram HTTP client
 - `homunculus/dataset_builder/builder.py` - SFT/DPO curation and snapshot materialization
-- `homunculus/trainer/manager.py` - Training orchestration, candidate evaluation, promotion gates
-- `homunculus/storage.py` - Artifact persistence (events, episodes, patches, registry)
+- `homunculus/trainer/manager.py` - Training orchestration, candidate evaluation, promotion gates, `run_merge`
+- `homunculus/storage.py` - Artifact persistence (events, episodes, patches, registry, task queue, merges, lineage)
 - `homunculus/config.py` - TOML config parsing into typed dataclasses
 - `homunculus/policy.py` - Guardrail pattern matching (block/warn rules)
-- `homunculus/models.py` - Core dataclasses (EpisodeRecord, SFTSample, AdapterManifest, etc.)
+- `homunculus/models.py` - Core dataclasses (EpisodeRecord, SFTSample, AdapterManifest, MergeManifest, LineageRecord, TaskQueueEntry, etc.)
+- `homunculus/daemon.py` - Continuous autonomous loop: introspection, task queue, `_check_evolution`
+- `homunculus/introspection/` - Self-analysis modes (metrics, critique, coverage, comparative) + rotating scheduler
+- `homunculus/task_generator/` - Weakness → task synthesis, user-suggestion resonance scanner, prioritizer
+- `homunculus/evolution/merge.py` - LoRA → base merge via MLX (α/r-scaled) or mergekit (PEFT-baked checkpoints)
+- `homunculus/evolution/validation.py` - Post-merge load / canary / coherence validation (fails closed)
+- `homunculus/evolution/lineage.py` - Full model history (registers every LoRA and every merge)
 
 ### Safety Boundaries
 
 These are **intentional constraints**, not bugs:
 
 - Source workspace must be clean before any episode
-- `run-episode` never mutates the source repo (worktree isolation)
-- Accepted patches stay as artifacts until explicit `apply-episode`
+- `run-episode` never mutates the source repo during verification (worktree isolation)
+- Accepted patches are auto-committed to the source repo when `[daemon].auto_commit_on_accept = true` (default). Set to `false` to retain the manual `apply-episode` workflow — patch artifacts remain available either way.
 - Training only from immutable materialized snapshots
-- Candidate promotion requires `--human-approved` flag
+- Candidate promotion is fully automated (the `require_human_approval` gate was removed in Phase 0); the promotion logic lives in `trainer/manager.promote_candidate`.
 
 ### Artifact Layout
 

@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from ..models import GeneratedTask, IntrospectionResult, utc_now
+from ..models import GeneratedTask, IntrospectionResult
 
 if TYPE_CHECKING:
     from ..storage import ArtifactStore

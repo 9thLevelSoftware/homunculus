@@ -1,7 +1,7 @@
 """Runtime construction - shared by cli.py and daemon.py."""
 from __future__ import annotations
 
-from .config import HomunculusConfig, load_config
+from .config import load_config
 from .dataset_builder.builder import DatasetBuilder
 from .memory_client.engram import EngramMemoryClient
 from .orchestrator.loop import EpisodeOrchestrator

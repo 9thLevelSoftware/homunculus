@@ -64,7 +64,10 @@ class ComparativeMode:
                     "detail": f"Found {len(grouped)} groups but none have both winners and losers",
                 }],
                 summary=f"Found {len(grouped)} task groups but none with both winners and losers",
-                metrics={"groups_found": len(grouped), "comparable_groups": 0},
+                metrics={
+                    "groups_found": float(len(grouped)),
+                    "comparable_groups": 0.0,
+                },
                 recommendations=[
                     "Continue running episodes to generate winner/loser pairs.",
                     "Ensure tasks are retried with the same comparison_group.",

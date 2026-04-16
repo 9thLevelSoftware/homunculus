@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import shutil
 
-from .config import load_config
 from .models import EvaluationMetrics, TaskRequest
 from .runtime import build_runtime
 from .task_runner.runner import WorkspacePreflightError

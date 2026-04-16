@@ -168,6 +168,7 @@ class EpisodeRecord:
     failure_stage: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    commit_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -258,6 +259,7 @@ class AdapterManifest:
     self_generated_ratio: float = 0.0
     evaluation_status: str = "pending"
     training_output: dict[str, Any] = field(default_factory=dict)
+    contributing_episode_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -294,7 +296,10 @@ class MergeManifest:
     target_base: str  # model_id of the new base
     merge_method: str  # "linear" | "ties" | "dare"
     merge_params: dict[str, Any] = field(default_factory=dict)
-    status: str = "pending"  # "pending" | "merging" | "validating" | "complete" | "failed"
+    # Lifecycle: pending -> merging -> merged -> validated | failed
+    # ("complete" is tolerated at deserialization for backward compat with
+    # historical merges.jsonl entries, but the runtime never sets it.)
+    status: str = "pending"
     created_at: str = field(default_factory=utc_now)
     completed_at: str | None = None
     output_path: str | None = None

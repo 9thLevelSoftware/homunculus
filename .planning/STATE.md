@@ -2,8 +2,8 @@
 
 ## Current Position
 - **Phase**: 4 of 5 (Weight Evolution)
-- **Status**: Phase 4 complete — all 4 plans executed successfully
-- **Last Activity**: Phase 4 execution (2026-04-16)
+- **Status**: Phase 4 complete — review passed; all deferred items resolved (`fix/spec-alignment`, 28 commits)
+- **Last Activity**: Resolved 4 previously-deferred review items — atomic update_merge, background merge worker, intermediate "merged" status, incremental lineage cache (2026-04-16)
 
 ## Progress
 ```
@@ -167,12 +167,26 @@ Critical fixes incorporated:
 
 | Criteria | Status |
 |----------|--------|
-| `evolution/merge.py` merges LoRA stack to base | Pass |
-| `evolution/lineage.py` tracks full model history | Pass |
-| `evolution/validation.py` catches bad merges | Pass |
-| Merge failure generates introspection task after 3 failures | Pass |
-| Tests cover merge success, failure, and rollback | Pass (53 tests) |
+| `evolution/merge.py` merges LoRA stack to base | Pass (MLX α/r math correct; mergekit uses baked checkpoints) |
+| `evolution/lineage.py` tracks full model history | Pass (register_lora wired into promote_candidate) |
+| `evolution/validation.py` catches bad merges | Pass (fails closed w/o backend; coherence hardened) |
+| Merge failure generates introspection task after N failures | Pass (integration test) |
+| Tests cover merge success, failure, and rollback | Pass (286 tests total) |
+| Daemon queue is restart-safe | Pass (Task 17) |
+| Commits land in target workspace | Pass (Task 16) |
+| Install from source works (`pip install -e .`) | Pass (Task 1) |
+
+### Phase 4 Spec-Fix Branch
+
+After initial Phase 4 close-out, an audit + `/legion:review` surfaced
+5 BLOCKERs and 16 WARNINGs (see
+`.planning/phases/04-weight-evolution/04-REVIEW.md`). All resolved on
+branch `fix/spec-alignment` (22 commits, `2b7128e..339dced`). Test
+suite grew from 230 → 286 tests, all passing. Details in the plan
+`docs/superpowers/plans/2026-04-16-spec-alignment-and-merge-correctness.md`
+and the review doc above.
 
 ## Next Action
 
-Run `/legion:review` to verify Phase 4: Weight Evolution
+Phase 4 complete and reviewed. Run `/legion:plan 5` to plan Phase 5:
+Full Autonomy.

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from ..config import HomunculusConfig
 from ..dataset_builder.builder import DatasetBuilder
@@ -83,6 +87,16 @@ class TrainingManager:
         ]
         if self.config.student.prompt_masking:
             command.append("--mask-prompt")
+        # Aggregate contributing episode ids from the snapshot's split-keyed map.
+        # Used downstream by lineage tracking (register_lora) so future merges can
+        # trace which episodes contributed to a candidate.
+        contributing_episodes: list[str] = []
+        seen: set[str] = set()
+        for split_episodes in (snapshot.selected_episode_ids or {}).values():
+            for ep_id in split_episodes:
+                if ep_id and ep_id not in seen:
+                    seen.add(ep_id)
+                    contributing_episodes.append(ep_id)
         manifest = AdapterManifest(
             model_id=self.config.student.model_id,
             base_model=self.config.student.model_id,
@@ -99,6 +113,7 @@ class TrainingManager:
             sample_counts=snapshot.sample_counts,
             self_generated_ratio=snapshot.self_generated_ratio,
             evaluation_status="pending",
+            contributing_episode_ids=contributing_episodes,
         )
         self.store.register_candidate(manifest)
         if simulate:
@@ -149,6 +164,19 @@ class TrainingManager:
             candidate.promotion_reason = "passed promotion gates"
             self.store.update_candidate(candidate)
             self.store.set_active_candidate(candidate)
+            # Register in lineage so subsequent merges can trace ancestry.
+            # Lineage is observability — failures must not crash promotion.
+            try:
+                self.lineage_tracker.register_lora(
+                    candidate,
+                    episode_ids=list(candidate.contributing_episode_ids or []),
+                )
+            except Exception as exc:  # noqa: BLE001 — observability path
+                logger.warning(
+                    "Failed to register candidate %s in lineage: %s",
+                    candidate.candidate_id,
+                    exc,
+                )
             return candidate
         candidate.status = "rejected"
         candidate.evaluation_status = "ineligible"
@@ -208,19 +236,41 @@ class TrainingManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_consecutive_merge_failures(self) -> int:
-        """Get consecutive merge failures from persistent state."""
+        """Get consecutive merge failures from persistent state.
+
+        Defaults to 0 on any error: missing file, corrupt JSON, missing key,
+        non-int value, negative value. This prevents an interrupted/corrupt
+        state file from crashing the daemon's _check_evolution cycle.
+        """
         state_file = self.config.paths.runtime_dir / "evolution_state.json"
         if not state_file.exists():
             return 0
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        return data.get("consecutive_merge_failures", 0)
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        value = data.get("consecutive_merge_failures", 0)
+        # bool is a subclass of int — exclude it explicitly.
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return 0
+        return value
 
     def _set_consecutive_merge_failures(self, count: int) -> None:
-        """Persist consecutive merge failure count."""
+        """Persist consecutive merge failure count atomically.
+
+        Writes to a temp file then os.replace's into place so an
+        interrupted write never produces a partial JSON.
+        """
         state_file = self.config.paths.runtime_dir / "evolution_state.json"
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {"consecutive_merge_failures": count}
-        state_file.write_text(json.dumps(data), encoding="utf-8")
+        tmp_file = state_file.with_suffix(state_file.suffix + ".tmp")
+        tmp_file.write_text(
+            json.dumps({"consecutive_merge_failures": int(max(0, count))}),
+            encoding="utf-8",
+        )
+        os.replace(tmp_file, state_file)
 
     def should_merge(self) -> bool:
         """Check if we should trigger a merge operation."""
@@ -231,6 +281,17 @@ class TrainingManager:
     def run_merge(self) -> "MergeResult":
         """Execute a merge operation with validation.
 
+        Lifecycle of the MergeManifest.status field as it flows through this
+        method:
+
+        - ``merging``  : set by MergeManager.merge() at append time
+        - ``merged``   : set by MergeManager.merge() once the backend wrote
+                         output but BEFORE validation runs. Never ``complete``
+                         here — that wording would imply the artifact is
+                         safe to consume, which is only true after validation.
+        - ``validated``: set here after a passing FullValidationResult
+        - ``failed``   : set on any backend or validation failure
+
         Returns:
             MergeResult with success status and details
         """
@@ -240,7 +301,7 @@ class TrainingManager:
         if not candidates:
             return MergeResult(success=False, error_message="No candidates to merge")
 
-        # Execute merge
+        # Execute merge — manifest comes back as status="merged" on success.
         result = self.merge_manager.merge(candidates)
 
         if not result.success:
@@ -252,6 +313,13 @@ class TrainingManager:
         if manifest is None:
             self._set_consecutive_merge_failures(self._get_consecutive_merge_failures() + 1)
             return MergeResult(success=False, error_message="Merge succeeded but no manifest returned")
+
+        # Defense in depth: enforce the contract that no manifest reaches the
+        # validator with status="complete". A buggy backend that pre-flips to
+        # "complete" would otherwise leak a misleading status to consumers.
+        if manifest.status == "complete":
+            manifest.status = "merged"
+            self.store.update_merge(manifest)
 
         validation = self.merge_validator.validate(manifest)
 
