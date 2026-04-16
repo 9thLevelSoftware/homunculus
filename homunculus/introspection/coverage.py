@@ -103,11 +103,14 @@ class CoverageMode:
             # Get workspace root from config
             workspace_root = self._get_workspace_root(context)
 
+            # Derive source directory name from config or workspace
+            source_dir_name = self._get_source_dir_name(context)
+
             # Step 1: Run pytest with coverage
             pytest_result = subprocess.run(
                 [
                     sys.executable, "-m", "pytest",
-                    "--cov=homunculus",
+                    f"--cov={source_dir_name}",
                     "--cov-report=",  # Suppress default output, just write .coverage
                     "-q",
                 ],
@@ -188,7 +191,7 @@ class CoverageMode:
         except Exception as e:
             findings.append({
                 "type": "coverage_error",
-                "reason": str(e),
+                "reason": f"Analysis failed ({type(e).__name__}): {str(e)[:200]}",
                 "severity": "warning",
             })
         finally:
@@ -212,7 +215,8 @@ class CoverageMode:
         metrics: dict[str, float] = {}
 
         workspace_root = self._get_workspace_root(context)
-        source_dir = workspace_root / "homunculus"
+        source_dir_name = self._get_source_dir_name(context)
+        source_dir = workspace_root / source_dir_name
 
         if not source_dir.exists():
             return findings, metrics
@@ -375,3 +379,12 @@ class CoverageMode:
 
         # Fallback: use current working directory
         return Path.cwd()
+
+    def _get_source_dir_name(self, context: "IntrospectionContext") -> str:
+        """Get the source directory name from config.
+
+        Derives from paths.root.name if available, otherwise defaults to 'homunculus'.
+        """
+        if hasattr(context.config, "paths") and context.config.paths is not None:
+            return context.config.paths.root.name
+        return "homunculus"

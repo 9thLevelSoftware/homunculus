@@ -204,7 +204,7 @@ class CritiqueMode:
                 "patterns": [],
                 "weaknesses": [],
                 "strengths": [],
-                "summary": f"Analysis failed: {str(e)[:200]}",
+                "summary": f"Analysis failed ({type(e).__name__}): {str(e)[:200]}",
                 "error": str(e),
             }
 

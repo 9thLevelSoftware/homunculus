@@ -267,8 +267,8 @@ class ComparativeMode:
             "avg_loser_lines": round(avg_loser_lines, 1),
             "avg_winner_steps": round(avg_winner_steps, 1),
             "avg_loser_steps": round(avg_loser_steps, 1),
-            "total_winners": len(winners),
-            "total_losers": len(losers),
+            "total_winners": float(len(winners)),
+            "total_losers": float(len(losers)),
         }
 
         # Size pattern

@@ -7,6 +7,14 @@ from typing import Any
 from ..models import EpisodeRecord, IntrospectionResult, utc_now
 from .base import IntrospectionContext
 
+# Threshold constants for metrics analysis
+SUCCESS_RATE_HEALTHY = 0.7  # Above this is considered healthy
+SUCCESS_RATE_LOW = 0.5  # Below this triggers recommendation
+ERROR_RATE_CRITICAL = 0.1  # Above this triggers critical finding
+RETRY_RATE_HIGH = 0.3  # Above this triggers warning finding
+FAILURE_STAGE_HIGH = 0.2  # Above this for a single stage triggers recommendation
+FAILURE_STAGE_WARNING = 0.1  # Above this triggers warning severity in findings
+
 
 class MetricsMode:
     """Analyzes episode records to compute quantitative performance signals."""
@@ -59,9 +67,12 @@ class MetricsMode:
         blocked = outcome_counts.get("blocked", 0)
 
         # Retry statistics
+        # avg_attempts_when_retried: Average attempt_index for episodes that
+        # required retries (attempt_index > 1). This metric captures the typical
+        # number of attempts needed when the first attempt fails.
         retry_episodes = [ep for ep in episodes if ep.attempt_index > 1]
         retry_count = len(retry_episodes)
-        avg_retries = (
+        avg_attempts_when_retried = (
             sum(ep.attempt_index for ep in retry_episodes) / retry_count
             if retry_count > 0
             else 0.0
@@ -82,7 +93,7 @@ class MetricsMode:
             "revert_rate": round(reverted / total, 3),
             "error_rate": round(error / total, 3),
             "blocked_rate": round(blocked / total, 3),
-            "avg_retries": round(avg_retries, 3),
+            "avg_attempts_when_retried": round(avg_attempts_when_retried, 3),
             "retry_rate": round(retry_count / total, 3),
             "self_generated_ratio": round(self_generated / total, 3),
         }
@@ -104,28 +115,28 @@ class MetricsMode:
         findings.append({
             "type": "success_rate",
             "value": success_rate,
-            "severity": "info" if success_rate >= 0.7 else "warning",
+            "severity": "info" if success_rate >= SUCCESS_RATE_HEALTHY else "warning",
             "detail": f"Success rate is {success_rate * 100:.1f}% across {episode_count} episodes",
         })
 
         # High error rate finding
         error_rate = metrics.get("error_rate", 0.0)
-        if error_rate > 0.1:
+        if error_rate > ERROR_RATE_CRITICAL:
             findings.append({
                 "type": "high_error_rate",
                 "value": error_rate,
                 "severity": "critical",
-                "detail": f"Error rate of {error_rate * 100:.1f}% exceeds 10% threshold",
+                "detail": f"Error rate of {error_rate * 100:.1f}% exceeds {ERROR_RATE_CRITICAL * 100:.0f}% threshold",
             })
 
         # High retry rate finding
         retry_rate = metrics.get("retry_rate", 0.0)
-        if retry_rate > 0.3:
+        if retry_rate > RETRY_RATE_HIGH:
             findings.append({
                 "type": "high_retry_rate",
                 "value": retry_rate,
                 "severity": "warning",
-                "detail": f"Retry rate of {retry_rate * 100:.1f}% exceeds 30% threshold",
+                "detail": f"Retry rate of {retry_rate * 100:.1f}% exceeds {RETRY_RATE_HIGH * 100:.0f}% threshold",
             })
 
         # Failure concentration finding
@@ -138,7 +149,7 @@ class MetricsMode:
             findings.append({
                 "type": "failure_concentration",
                 "value": max_stage[1],
-                "severity": "warning" if max_stage[1] > 0.1 else "info",
+                "severity": "warning" if max_stage[1] > FAILURE_STAGE_WARNING else "info",
                 "detail": f"Most failures occur at '{stage_name}' stage ({max_stage[1] * 100:.1f}% of episodes)",
             })
 
@@ -154,27 +165,27 @@ class MetricsMode:
         failure_execute = metrics.get("failure_execute", 0.0)
         failure_plan = metrics.get("failure_plan", 0.0)
 
-        if success_rate < 0.5:
+        if success_rate < SUCCESS_RATE_LOW:
             recommendations.append(
-                "Success rate below 50%. Consider reviewing recent failures for common patterns."
+                f"Success rate below {SUCCESS_RATE_LOW * 100:.0f}%. Consider reviewing recent failures for common patterns."
             )
 
-        if error_rate > 0.1:
+        if error_rate > ERROR_RATE_CRITICAL:
             recommendations.append(
                 "High error rate detected. Check for infrastructure issues or invalid task prompts."
             )
 
-        if retry_rate > 0.3:
+        if retry_rate > RETRY_RATE_HIGH:
             recommendations.append(
                 "Many tasks require retries. Consider improving initial plan generation."
             )
 
-        if failure_execute > 0.2:
+        if failure_execute > FAILURE_STAGE_HIGH:
             recommendations.append(
                 "Execute stage failures high. Review patch application and worktree isolation."
             )
 
-        if failure_plan > 0.2:
+        if failure_plan > FAILURE_STAGE_HIGH:
             recommendations.append(
                 "Plan stage failures high. Teacher model may need prompt adjustments."
             )

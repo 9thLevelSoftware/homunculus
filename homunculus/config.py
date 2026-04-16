@@ -204,12 +204,31 @@ def load_config(path: str | Path) -> HomunculusConfig:
 
     # Parse [introspection] with defaults if section missing
     introspection_data = raw.get("introspection", {})
+
+    # Validate and apply defaults for intervals (must be >= 1)
+    def _validate_interval(value: int, default: int) -> int:
+        """Ensure interval is at least 1, otherwise use default."""
+        return value if value >= 1 else default
+
+    metrics_interval = _validate_interval(
+        introspection_data.get("metrics_interval", 1), 1
+    )
+    critique_interval = _validate_interval(
+        introspection_data.get("critique_interval", 3), 3
+    )
+    coverage_interval = _validate_interval(
+        introspection_data.get("coverage_interval", 5), 5
+    )
+    comparative_interval = _validate_interval(
+        introspection_data.get("comparative_interval", 3), 3
+    )
+
     introspection = IntrospectionSettings(
         enabled=introspection_data.get("enabled", True),
-        metrics_interval=introspection_data.get("metrics_interval", 1),
-        critique_interval=introspection_data.get("critique_interval", 3),
-        coverage_interval=introspection_data.get("coverage_interval", 5),
-        comparative_interval=introspection_data.get("comparative_interval", 3),
+        metrics_interval=metrics_interval,
+        critique_interval=critique_interval,
+        coverage_interval=coverage_interval,
+        comparative_interval=comparative_interval,
         window_size=introspection_data.get("window_size", 50),
         critique_enabled=introspection_data.get("critique_enabled", True),
     )
