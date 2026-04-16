@@ -30,7 +30,7 @@ if (-not $env:OPENAI_API_KEY) {
 # Step 1 — throughput precheck
 if (-not $Force) {
     Write-Host "=== Step 1: throughput precheck ===" -ForegroundColor Cyan
-    & "$PSScriptRoot\precheck.ps1" -Config $Config | Out-Null
+    & "$PSScriptRoot\precheck.ps1" -Config $Config
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Throughput precheck failed (exit $LASTEXITCODE). Run bootstrap.ps1 with more tasks, or lower [evolution] thresholds."
         exit 1
