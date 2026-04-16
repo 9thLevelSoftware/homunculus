@@ -16,3 +16,5 @@ htmlcov/
 *.log
 runtime/
 .worktrees/
+traces/
+models/

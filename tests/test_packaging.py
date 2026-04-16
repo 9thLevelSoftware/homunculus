@@ -48,5 +48,19 @@ class PackagingTests(unittest.TestCase):
                 importlib.import_module(name)
 
 
+class GitignoreTests(unittest.TestCase):
+    """Lock in .gitignore coverage so future contributors can't regress hygiene."""
+
+    REQUIRED_PATTERNS = ["__pycache__/", "*.pyc", "traces/", "runtime/", "models/"]
+
+    def test_gitignore_covers_runtime_dirs(self):
+        root = Path(__file__).resolve().parent.parent
+        gitignore = (root / ".gitignore").read_text(encoding="utf-8")
+        for pattern in self.REQUIRED_PATTERNS:
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, gitignore,
+                              f".gitignore is missing required pattern: {pattern}")
+
+
 if __name__ == "__main__":
     unittest.main()
