@@ -2,8 +2,8 @@
 
 ## Current Position
 - **Phase**: 4 of 5 (Weight Evolution)
-- **Status**: Phase 4 complete — review passed after spec-fix branch (`fix/spec-alignment`, 23 commits)
-- **Last Activity**: Phase 4 spec-fix branch + skipUnless guards on optional-dep tests (2026-04-16)
+- **Status**: Phase 4 complete — review passed; all deferred items resolved (`fix/spec-alignment`, 28 commits)
+- **Last Activity**: Resolved 4 previously-deferred review items — atomic update_merge, background merge worker, intermediate "merged" status, incremental lineage cache (2026-04-16)
 
 ## Progress
 ```

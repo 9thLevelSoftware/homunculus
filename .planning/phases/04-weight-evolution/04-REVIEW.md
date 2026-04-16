@@ -13,8 +13,8 @@
 | Severity   | Found | Resolved | Deferred |
 |------------|-------|----------|----------|
 | BLOCKER    | 5     | 5        | 0        |
-| WARNING    | 16    | 14       | 2        |
-| SUGGESTION | 4     | 3        | 1        |
+| WARNING    | 16    | 16       | 0        |
+| SUGGESTION | 4     | 4        | 0        |
 
 The initial audit + `/legion:review` cycle 1 surfaced 5 BLOCKERs (merge
 pipeline broken despite passing tests) and 16 WARNINGs (spec drift,
@@ -48,10 +48,10 @@ races). The spec-fix branch turned each finding into a concrete task
 | Tests 100 % mocked merge backends (`patch.object(mgr, "_merge_with_mergekit")`) — argv / YAML / stderr paths never exercised | WARNING | Task 20 | `c7bd789` |
 | No integration tests for `TrainingManager.run_merge` or `Daemon._check_evolution` despite Phase 4 claiming "tests cover merge success, failure, and rollback" | WARNING | Task 21 | `339dced` |
 | No `04-REVIEW.md` | WARNING | Task 22 | this commit |
-| `storage.update_merge` read-modify-write race | WARNING | **deferred** (single-instance daemon lock in Task 8 rules out concurrent writers; acceptable risk until multi-daemon support) | — |
-| Daemon performs synchronous blocking merge on the main cycle thread | WARNING | **deferred** (performance, not correctness — documented here; revisit when merge wall-time becomes user-visible) | — |
-| `manifest.status == "complete"` briefly before validation runs (observable via concurrent read) | SUGGESTION | **not addressed** (mitigated: validation always runs before anything reads the manifest as "authoritative"; noted for future lock-free refactor) | — |
-| Lineage cache O(N²) on sequential merges | SUGGESTION | **deferred** (acceptable until merge counts exceed ~50; revisit then) | — |
+| `storage.update_merge` read-modify-write race | WARNING | Task 24 (atomic temp+replace already present; added class-level threading.Lock around the read-modify-write window) | `635abe1` |
+| Daemon performs synchronous blocking merge on the main cycle thread | WARNING | Task 24 (merge runs on a daemon Thread with single-flight guard; result processed on the next cycle) | `c74c475` |
+| `manifest.status == "complete"` briefly before validation runs (observable via concurrent read) | SUGGESTION | Task 24 (lifecycle now `merging → merged → validated\|failed`; "complete" is no longer set at runtime; defense-in-depth downgrade in `run_merge`) | `d5b75be` |
+| Lineage cache O(N²) on sequential merges | SUGGESTION | Task 24 (incremental cache update via `_cache_record`; `get_current_generation` also routed through cache) | `06978c8` |
 
 ## Reviewer Verdicts (final)
 
@@ -73,31 +73,46 @@ races). The spec-fix branch turned each finding into a concrete task
   `promote_candidate` (Task 15). `register_merge` aggregates across
   every source LoRA (Task 10). Mixed-base stacks rejected (Task 11).
 
-## Suggestions (deferred)
+## Suggestions (resolved)
 
-- **Lineage cache O(N²) on sequential merges** — acceptable until
-  merge counts exceed ~50; revisit then.
-- **Manifest status briefly "complete" before validation** — mitigated
-  in practice by the fact that no external consumer reads the manifest
-  as authoritative until validation completes. Noted for a future
-  lock-free refactor.
-- **Synchronous blocking merge on the cycle thread** — performance
-  not correctness. Would require a background worker; deferred until
-  merge wall-time becomes user-visible.
-- **`storage.update_merge` read-modify-write race** — acceptable while
-  the single-instance daemon lock (Task 8) holds. Revisit if / when
-  multi-daemon topology is introduced.
+All four items previously deferred from the spec-fix branch were
+addressed in Task 24, each with TDD (failing test → fix → green) and
+its own commit:
+
+- **`storage.update_merge` read-modify-write race** (`635abe1`) —
+  added a class-level `threading.Lock` guarding the load → mutate →
+  atomic-replace sequence. New tests cover both crash safety
+  (simulated `os.replace` failure) and concurrent-writer correctness
+  (deterministic race exposed via slowed `load_merges`).
+- **Daemon synchronous blocking merge** (`c74c475`) — merges now run
+  on a `threading.Thread(daemon=True)` with a single-flight guard;
+  the next cycle observes completion and processes the result. New
+  tests assert `_check_evolution` returns in <1s while a 3s stub
+  merge runs in the background, and that the subsequent cycle
+  processes the completed result.
+- **Manifest "complete" status before validation** (`d5b75be`) —
+  lifecycle now `pending → merging → merged → validated | failed`.
+  `MergeManager.merge()` sets `merged` on backend success;
+  `TrainingManager.run_merge()` owns the `validated|failed`
+  transition. Defense in depth: `run_merge` downgrades any legacy
+  `complete` it observes back to `merged` before validating. New
+  tests capture every persisted status across success and failure
+  paths and assert `complete` never appears.
+- **Lineage cache O(N²) on sequential merges** (`06978c8`) — replaced
+  post-append `_invalidate_cache()` calls with `_cache_record(record)`
+  for incremental updates; routed `get_current_generation` through
+  the cache. New test asserts ≤1 cold lineage load when registering
+  a base + 10 LoRAs (was 10+).
 
 ## Test Suite Status
 
 - **Before spec-fix branch**: 230 tests, ~57 % green, merge pipeline
   passing tests but broken end-to-end.
 - **After spec-fix branch**: 286 tests, all green.
-- **New tests**: 56 across 22 tasks, including 3 restart-safety
-  scenarios (Task 17), 5 MLX merge math scenarios (Task 18),
-  2 mergekit YAML correctness scenarios (Task 19), subprocess-level
-  mocks (Task 20), and 9 integration tests for `run_merge` and
-  `_check_evolution` (Task 21).
+- **After Task 24**: 293 tests, all green (skipped=10).
+- **New tests**: 56 across Tasks 1–22, plus 7 across Task 24
+  (2 storage atomicity/concurrency, 2 daemon async-merge,
+  2 manifest-lifecycle, 1 lineage-cache).
 
 ## Lessons Carried Forward
 
