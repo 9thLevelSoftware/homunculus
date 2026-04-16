@@ -1,0 +1,67 @@
+{
+  "captured_at": "2026-04-16T23:03:08.543531+00:00",
+  "soak_session": "Session 1 \u2014 blocked at throughput pre-check",
+  "autonomy_report": {
+    "exit_code": 0,
+    "parsed": true,
+    "stderr_tail": "",
+    "data": {
+      "generated_at": "2026-04-16T23:03:08.533705+00:00",
+      "uptime_seconds": 75785.533705,
+      "cycles_completed": 2,
+      "episodes_total": 0,
+      "episodes_success": 0,
+      "episodes_failed": 0,
+      "self_directed_tasks_completed": 0,
+      "suggestion_tasks_completed": 0,
+      "loras_trained": 0,
+      "loras_merged": 0,
+      "current_base_generation": 0,
+      "patch_success_rate": 0.0,
+      "patch_success_rate_trend": null,
+      "coverage_percent": null,
+      "coverage_trend": null,
+      "watchdog_flags": []
+    }
+  },
+  "preflight": {
+    "status": "NOT_RUN",
+    "reason": "Throughput pre-check gate failed (\u00a72.2 of SOAK-PROTOCOL.md). Preflight will run in Session 1b or a re-start session after operator decision."
+  },
+  "throughput_precheck": {
+    "computed_at": "2026-04-16T23:00:13.267755+00:00",
+    "window_days": 14,
+    "episodes_file_exists": true,
+    "episodes_file_size_bytes": 0,
+    "total_episodes_all_time": 0,
+    "total_success_all_time": 0,
+    "episodes_in_14d_window": 0,
+    "success_in_14d_window": 0,
+    "thresholds": {
+      "auto_train_after_samples": 50,
+      "auto_merge_after_loras": 5
+    },
+    "projection": {
+      "episodes_per_day": 0.0,
+      "success_rate": 0.0,
+      "projected_loras_trained_7d": 0.0,
+      "projected_loras_merged_7d": 0.0
+    },
+    "note": "no historical data; projection is nominal from config thresholds",
+    "safe_to_start": false,
+    "safety_margin_met": false
+  },
+  "blocker": {
+    "status": "BLOCKED",
+    "gate": "throughput_precheck",
+    "projected_loras_merged_7d": 0.0,
+    "required_minimum": 1.0,
+    "safety_margin_target": 1.5,
+    "reason": "No historical episode data in traces/episodes.jsonl (file is 0 bytes). Projection is 0.0 LoRA merges across the 7-day window using current config thresholds (auto_train_after_samples=50, auto_merge_after_loras=5). Protocol \u00a72.2 forbids starting the daemon with projection < 1.0. Daemon has NOT been started. No soak branch has been created.",
+    "options_for_operator": [
+      "Option A (preferred): Lower [evolution].auto_train_after_samples (e.g., 10) AND auto_merge_after_loras (e.g., 2) in homunculus.toml. Commit BEFORE soak starts. Re-run Session 1.",
+      "Option B: Extend soak duration to 14+ days and/or seed traces/episodes.jsonl by running a few manual episodes to bootstrap episodes_per_day > 0. Re-run pre-check.",
+      "Option C: Operator explicitly accepts data-starvation risk, documents decision in STATE.md, and authorizes bypass of \u00a72.2 gate. SC3 may then fail in 05-03-2."
+    ]
+  }
+}
