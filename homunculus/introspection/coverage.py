@@ -299,7 +299,7 @@ class CoverageMode:
         recommendations: list[str] = []
 
         workspace_root = self._get_workspace_root(context)
-        source_dir = workspace_root / "homunculus"
+        source_dir = workspace_root / self._get_source_dir_name(context)
         tests_dir = workspace_root / "tests"
 
         if not source_dir.exists():

@@ -349,15 +349,27 @@ class Daemon:
                         failure_count=trainer._get_consecutive_merge_failures(),
                         last_error=result.error_message,
                     )
-                    # Add to task queue
+                    # Add to task queue. Only reset the failure counter on
+                    # successful enqueue — if persistence fails (disk full,
+                    # permission, race), we must NOT zero the counter,
+                    # otherwise the introspection trigger silently dies and
+                    # the merge failure goes uninvestigated.
                     entry = TaskQueueEntry(
                         task_id=task.task_id,
                         task=task,
                         queued_at=utc_now(),
                         status="pending",
                     )
-                    self.store.append_to_queue(entry)
-                    trainer.reset_merge_failure_count()
+                    try:
+                        self.store.append_to_queue(entry)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to enqueue merge-failure investigation task: %s. "
+                            "Counter NOT reset; will retry next cycle.",
+                            exc,
+                        )
+                    else:
+                        trainer.reset_merge_failure_count()
 
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""

@@ -190,14 +190,17 @@ class MergeManager:
         output_dir = models_dir / "merged" / manifest.merge_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate mergekit config YAML
-        config = self._generate_mergekit_config(manifest, loras)
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.safe_dump(config, f)
-            config_path = f.name
-
+        # Initialize before try so the finally can run safely even if
+        # config generation or temp-file creation raises.
+        config_path: str | None = None
         try:
+            # Generate mergekit config YAML
+            config = self._generate_mergekit_config(manifest, loras)
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                yaml.safe_dump(config, f)
+                config_path = f.name
+
             # Run mergekit-yaml
             cmd = [
                 "mergekit-yaml",
@@ -238,7 +241,8 @@ class MergeManager:
                 error_message=f"mergekit timed out after {self.config.evolution.validation_timeout_seconds}s",
             )
         finally:
-            Path(config_path).unlink(missing_ok=True)
+            if config_path is not None:
+                Path(config_path).unlink(missing_ok=True)
 
     def _generate_mergekit_config(
         self,

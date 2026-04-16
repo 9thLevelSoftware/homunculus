@@ -667,6 +667,82 @@ class TestComparativeMode(unittest.TestCase):
         self.assertEqual(result.metrics["total_losers"], 1.0)
 
 
+class ComparativeTypeContractTests(unittest.TestCase):
+    """Verify ComparativeMode.run() returns dict[str, float], not ints.
+
+    Regression: groups_found and comparable_groups in the
+    no-comparable-pairs branch were emitted as int (via len()),
+    breaking the IntrospectionResult.metrics dict[str, float] contract
+    relied on by introspection persistence and downstream consumers.
+    """
+
+    def _run_mode(self, episodes: list[EpisodeRecord]) -> IntrospectionResult:
+        mode = ComparativeMode()
+        store = MockArtifactStore(episodes)
+        config = MockConfig()
+        context = IntrospectionContext(
+            store=store,
+            config=config,
+            cycle_number=1,
+            window_size=50,
+        )
+        return mode.run(context)
+
+    def _assert_all_floats(self, result: IntrospectionResult) -> None:
+        for key, value in result.metrics.items():
+            with self.subTest(key=key):
+                # bool is a subclass of int in Python, exclude it explicitly
+                self.assertNotIsInstance(
+                    value, bool,
+                    f"metric {key!r} is bool, expected float",
+                )
+                self.assertIsInstance(
+                    value, float,
+                    f"metric {key!r} is {type(value).__name__}, expected float",
+                )
+
+    def test_no_comparable_pairs_metrics_are_floats(self):
+        """groups_found / comparable_groups must be float in the
+        'groups present but no winner+loser pairs' branch."""
+        episodes = [
+            _make_episode("ep-1", outcome="accepted", comparison_group="task-A"),
+            _make_episode("ep-2", outcome="accepted", comparison_group="task-A"),
+            _make_episode("ep-3", outcome="reverted", comparison_group="task-B"),
+        ]
+        result = self._run_mode(episodes)
+        # Confirm we are exercising the right branch
+        self.assertTrue(
+            any(f.get("type") == "no_comparable_groups" for f in result.findings),
+            "expected to hit the no_comparable_groups branch",
+        )
+        self.assertIn("groups_found", result.metrics)
+        self.assertIn("comparable_groups", result.metrics)
+        self._assert_all_floats(result)
+
+    def test_valid_pair_metrics_are_floats(self):
+        """All metrics in the aggregated branch must be float."""
+        episodes = [
+            _make_episode(
+                "ep-1",
+                outcome="accepted",
+                comparison_group="task-A",
+                patch="+ new line\n- old line",
+                plan=["Step 1"],
+            ),
+            _make_episode(
+                "ep-2",
+                outcome="reverted",
+                comparison_group="task-A",
+                patch="+ very long patch\n" * 20,
+                plan=["Step 1", "Step 2", "Step 3"],
+                failure_stage="execute",
+            ),
+        ]
+        result = self._run_mode(episodes)
+        self.assertTrue(result.metrics, "expected non-empty metrics in aggregated branch")
+        self._assert_all_floats(result)
+
+
 class TestIntrospectionScheduler(unittest.TestCase):
     """Tests for IntrospectionScheduler."""
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import HomunculusConfig
-from ..models import AdapterManifest, LineageRecord, MergeManifest, utc_now
+from ..models import AdapterManifest, LineageRecord, MergeManifest
 from ..storage import ArtifactStore
 
 
