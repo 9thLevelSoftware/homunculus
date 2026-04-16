@@ -17,8 +17,29 @@ class LineageTracker:
         self._cache: dict[str, LineageRecord] | None = None
 
     def _invalidate_cache(self) -> None:
-        """Clear the in-memory cache."""
+        """Clear the in-memory cache (cold-reload on next access).
+
+        Prefer ``_cache_record`` for normal append paths — invalidation
+        forces an O(N) reload of the entire lineage file the next time
+        any cache consumer runs, and N consecutive merges then become
+        O(N^2). Use this only when the on-disk lineage may have changed
+        underneath us in ways the in-process tracker cannot reconstruct
+        incrementally (e.g. another writer rewrote the file).
+        """
         self._cache = None
+
+    def _cache_record(self, record: LineageRecord) -> None:
+        """Insert a freshly-appended record into the in-memory cache.
+
+        Avoids the O(N^2) reload pattern: register_* used to call
+        ``_invalidate_cache()`` after each append, forcing the next
+        ``_load_cache()`` to re-read the entire JSONL. With N sequential
+        merges that compounded into N reads of an N-row file. We now
+        push the new record directly into the existing cache and only
+        fall back to a cold load when the cache is unset.
+        """
+        if self._cache is not None:
+            self._cache[record.record_id] = record
 
     def _load_cache(self) -> dict[str, LineageRecord]:
         """Load all lineage records into a lookup dict."""
@@ -33,11 +54,16 @@ class LineageTracker:
         return cache.get(record_id)
 
     def get_current_generation(self) -> int:
-        """Get the highest generation number in the lineage."""
-        records = self.store.load_lineage()
-        if not records:
+        """Get the highest generation number in the lineage.
+
+        Uses the in-memory cache to avoid re-reading the entire lineage
+        file on every call (this method is invoked once per merge, and
+        every register_* call previously invalidated the cache).
+        """
+        cache = self._load_cache()
+        if not cache:
             return 0
-        return max(r.generation for r in records)
+        return max(r.generation for r in cache.values())
 
     def register_base_model(self, model_id: str, metadata: dict[str, Any] | None = None) -> LineageRecord:
         """Register a base model as generation 0 in the lineage.
@@ -56,7 +82,7 @@ class LineageTracker:
         )
 
         self.store.append_lineage(record)
-        self._invalidate_cache()
+        self._cache_record(record)
         return record
 
     def ensure_base_registered(self, model_id: str) -> LineageRecord:
@@ -99,7 +125,7 @@ class LineageTracker:
         )
 
         self.store.append_lineage(record)
-        self._invalidate_cache()
+        self._cache_record(record)
         return record
 
     def register_merge(
@@ -168,7 +194,7 @@ class LineageTracker:
         )
 
         self.store.append_lineage(record)
-        self._invalidate_cache()
+        self._cache_record(record)
         return record
 
     def get_ancestors(self, record_id: str, max_depth: int | None = None) -> list[LineageRecord]:

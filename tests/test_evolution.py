@@ -1037,6 +1037,68 @@ class LineageTrackerTests(unittest.TestCase):
 
         self.assertEqual(gen, 2)
 
+    def test_lineage_cache_no_redundant_reads(self):
+        """Registering N LoRAs sequentially must NOT trigger N reloads.
+
+        Previously each register_* invalidated the cache, forcing the next
+        cache consumer to read the entire lineage file. With N appends
+        followed by N cache consumers (e.g. ensure_base_registered, get_record)
+        the cost compounded to O(N^2) reads. The fix is incremental cache
+        update: append + insert into the dict, no reload.
+        """
+        from homunculus.evolution.lineage import LineageTracker
+
+        # Replace the lambda load with a counted MagicMock so we can audit
+        # how many times the tracker re-reads the lineage file.
+        load_calls = {"n": 0}
+        records_view = self.lineage_records  # alias used by both store funcs
+
+        def counted_load():
+            load_calls["n"] += 1
+            return list(records_view)
+
+        self.store.load_lineage = counted_load
+
+        tracker = LineageTracker(self.config, self.store)
+
+        # Register a base + 10 LoRAs sequentially. Each register_lora call
+        # invokes ensure_base_registered (which calls get_record) and then
+        # appends. Without the incremental cache fix, every append
+        # invalidates and the next get_record re-reads the file.
+        tracker.register_base_model("qwen2.5-coder-1.5b")
+        for i in range(10):
+            candidate = AdapterManifest(
+                model_id="qwen2.5-coder-1.5b",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path=f"/path/lora-{i}",
+                dataset_snapshot=f"snap-{i}",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="trained",
+                created_at="2024-01-01",
+                candidate_id=f"lora-{i:03d}",
+            )
+            tracker.register_lora(candidate, episode_ids=[f"ep-{i}"])
+
+        # All 11 records should be on disk.
+        self.assertEqual(len(self.lineage_records), 11)
+        # And only ONE cold load should have occurred — the very first
+        # ensure_base_registered call. Every subsequent register_* should
+        # have piggybacked on the in-memory cache via _cache_record.
+        self.assertLessEqual(
+            load_calls["n"],
+            1,
+            f"expected at most 1 cold lineage load, got {load_calls['n']} "
+            "(O(N) reads instead of incremental cache update)",
+        )
+
+        # Sanity: the cache must still see every record.
+        for i in range(10):
+            self.assertIsNotNone(tracker.get_record(f"lora-{i:03d}"))
+        # Reads above hit the cache, not the file.
+        self.assertLessEqual(load_calls["n"], 1)
+
 
 class ValidationTests(unittest.TestCase):
     def setUp(self):
