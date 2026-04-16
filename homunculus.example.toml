@@ -55,6 +55,19 @@ enabled = false
 min_successful_sft_promotions = 3
 env = { PYTORCH_ENABLE_MPS_FALLBACK = "1" }
 
+[daemon]
+enabled = true
+cycle_interval_minutes = 480
+max_episodes_per_cycle = 5
+suggestions_dir = "suggestions"
+
+[evolution]
+auto_promote = true
+auto_apply = true
+auto_train_after_samples = 50
+auto_merge_after_loras = 5
+rollback_on_degradation = true
+
 [guardrails]
 
 [[guardrails.block_patterns]]
