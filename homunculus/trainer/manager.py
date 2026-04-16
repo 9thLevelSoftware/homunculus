@@ -281,6 +281,17 @@ class TrainingManager:
     def run_merge(self) -> "MergeResult":
         """Execute a merge operation with validation.
 
+        Lifecycle of the MergeManifest.status field as it flows through this
+        method:
+
+        - ``merging``  : set by MergeManager.merge() at append time
+        - ``merged``   : set by MergeManager.merge() once the backend wrote
+                         output but BEFORE validation runs. Never ``complete``
+                         here — that wording would imply the artifact is
+                         safe to consume, which is only true after validation.
+        - ``validated``: set here after a passing FullValidationResult
+        - ``failed``   : set on any backend or validation failure
+
         Returns:
             MergeResult with success status and details
         """
@@ -290,7 +301,7 @@ class TrainingManager:
         if not candidates:
             return MergeResult(success=False, error_message="No candidates to merge")
 
-        # Execute merge
+        # Execute merge — manifest comes back as status="merged" on success.
         result = self.merge_manager.merge(candidates)
 
         if not result.success:
@@ -302,6 +313,13 @@ class TrainingManager:
         if manifest is None:
             self._set_consecutive_merge_failures(self._get_consecutive_merge_failures() + 1)
             return MergeResult(success=False, error_message="Merge succeeded but no manifest returned")
+
+        # Defense in depth: enforce the contract that no manifest reaches the
+        # validator with status="complete". A buggy backend that pre-flips to
+        # "complete" would otherwise leak a misleading status to consumers.
+        if manifest.status == "complete":
+            manifest.status = "merged"
+            self.store.update_merge(manifest)
 
         validation = self.merge_validator.validate(manifest)
 

@@ -296,7 +296,10 @@ class MergeManifest:
     target_base: str  # model_id of the new base
     merge_method: str  # "linear" | "ties" | "dare"
     merge_params: dict[str, Any] = field(default_factory=dict)
-    status: str = "pending"  # "pending" | "merging" | "validating" | "complete" | "failed"
+    # Lifecycle: pending -> merging -> merged -> validated | failed
+    # ("complete" is tolerated at deserialization for backward compat with
+    # historical merges.jsonl entries, but the runtime never sets it.)
+    status: str = "pending"
     created_at: str = field(default_factory=utc_now)
     completed_at: str | None = None
     output_path: str | None = None

@@ -156,7 +156,12 @@ class MergeManager:
                 result = self._merge_with_mlx(manifest, loras)
 
             if result.success:
-                manifest.status = "complete"
+                # Lifecycle: merging -> merged (this point) -> validated|failed.
+                # We do NOT use "complete" here: that would imply the merge is
+                # safe to consume, but no validation has run yet. The trainer's
+                # run_merge() will flip this to "validated" or "failed" after
+                # the validator runs.
+                manifest.status = "merged"
                 manifest.completed_at = utc_now()
                 manifest.output_path = result.output_path
             else:

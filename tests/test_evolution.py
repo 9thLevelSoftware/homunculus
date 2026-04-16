@@ -639,7 +639,10 @@ class MergeManagerTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.store.update_merge.assert_called_once()
         updated_manifest = self.store.update_merge.call_args[0][0]
-        self.assertEqual(updated_manifest.status, "complete")
+        # Lifecycle invariant: backend reports "merged" (not "complete") so
+        # downstream code knows validation has not yet run. The trainer flips
+        # this to "validated" only after the validator passes.
+        self.assertEqual(updated_manifest.status, "merged")
         self.assertIsNotNone(updated_manifest.completed_at)
 
     @unittest.skipUnless(_has_yaml(), "pyyaml not installed (mergekit path)")
@@ -2203,6 +2206,118 @@ class RunMergeIntegrationTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(mgr._get_consecutive_merge_failures(), 1)
         mgr._merge_validator.validate.assert_not_called()
+
+    def test_manifest_status_never_complete_before_validation(self):
+        """The MergeManifest must never be persisted with status="complete".
+
+        Lifecycle contract: merging -> merged -> validated | failed.
+        A manifest with status="complete" leaks the misleading impression that
+        the merge artifact is safe to consume before the validator has run.
+        Capture every status the trainer flushes via update_merge and assert
+        none of them are "complete", and that the terminal state is correct.
+        """
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.evolution.validation import (
+            FullValidationResult,
+            ValidationResult,
+        )
+
+        # --- Success path ---
+        mgr = self._make_manager()
+        manifest = self._make_merge_manifest("merge-lifecycle-ok")
+
+        # Simulate the contract that MergeManager.merge() upholds: success
+        # returns with status="merged", not "complete".
+        manifest.status = "merged"
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=True, merge_manifest=manifest, output_path=manifest.output_path
+        )
+        mgr._merge_validator.validate.return_value = FullValidationResult(
+            passed=True, stages=[]
+        )
+        mgr._lineage_tracker.get_current_generation.return_value = 0
+
+        seen_statuses: list[str] = []
+
+        def capture_update(m):
+            seen_statuses.append(m.status)
+
+        self.store.update_merge.side_effect = capture_update
+
+        result = mgr.run_merge()
+
+        self.assertTrue(result.success)
+        self.assertNotIn(
+            "complete", seen_statuses,
+            f"manifest must never be persisted with status=complete; saw {seen_statuses}",
+        )
+        # Terminal state on success must be "validated".
+        self.assertEqual(seen_statuses[-1], "validated")
+        self.assertEqual(manifest.status, "validated")
+
+        # --- Validation-failure path ---
+        mgr2 = self._make_manager()
+        manifest2 = self._make_merge_manifest("merge-lifecycle-bad")
+        manifest2.status = "merged"
+        mgr2._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr2._merge_manager.merge.return_value = MergeResult(
+            success=True, merge_manifest=manifest2, output_path=manifest2.output_path
+        )
+        mgr2._merge_validator.validate.return_value = FullValidationResult(
+            passed=False,
+            stages=[
+                ValidationResult(stage="coherence", passed=False, message="gibberish"),
+            ],
+        )
+
+        seen_statuses2: list[str] = []
+
+        # Reset side_effect for the new mock.
+        store_mock = mgr2.store
+        store_mock.update_merge.side_effect = lambda m: seen_statuses2.append(m.status)
+
+        result2 = mgr2.run_merge()
+
+        self.assertFalse(result2.success)
+        self.assertNotIn(
+            "complete", seen_statuses2,
+            f"manifest must never be persisted with status=complete; saw {seen_statuses2}",
+        )
+        # Terminal state on validation failure must be "failed".
+        self.assertEqual(seen_statuses2[-1], "failed")
+        self.assertEqual(manifest2.status, "failed")
+
+    def test_run_merge_corrects_legacy_complete_status_before_validation(self):
+        """Defense in depth: if a (buggy / legacy) backend returned a manifest
+        with status="complete", run_merge must downgrade it to "merged" before
+        validation runs, so consumers never observe the misleading state.
+        """
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.evolution.validation import FullValidationResult
+
+        mgr = self._make_manager()
+        manifest = self._make_merge_manifest("merge-legacy-complete")
+        manifest.status = "complete"  # Simulate misbehaving backend
+
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=True, merge_manifest=manifest, output_path=manifest.output_path
+        )
+        mgr._merge_validator.validate.return_value = FullValidationResult(
+            passed=True, stages=[]
+        )
+        mgr._lineage_tracker.get_current_generation.return_value = 0
+
+        seen_statuses: list[str] = []
+        self.store.update_merge.side_effect = lambda m: seen_statuses.append(m.status)
+
+        mgr.run_merge()
+
+        # First persisted status must be the corrected "merged", not "complete".
+        self.assertEqual(seen_statuses[0], "merged")
+        self.assertNotIn("complete", seen_statuses)
+        self.assertEqual(seen_statuses[-1], "validated")
 
 
 if __name__ == "__main__":
