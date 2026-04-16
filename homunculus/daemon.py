@@ -229,12 +229,66 @@ class Daemon:
                     error=str(e),
                 )
 
+        # After episodes complete, check evolution
+        self._check_evolution()
+
         return DaemonCycleResult(
             status="executed",
             tasks_executed=executed,
             tasks_accepted=accepted,
             tasks_reverted=reverted,
         )
+
+    def _check_evolution(self) -> None:
+        """Check if evolution actions (merge) should run."""
+        if not self.config.evolution.enabled:
+            return
+
+        if self.store is None:
+            return
+
+        # Lazy import to avoid circular dependencies
+        from .trainer.manager import TrainingManager
+        from .dataset_builder.builder import DatasetBuilder
+
+        builder = DatasetBuilder(self.config, self.store)
+        trainer = TrainingManager(self.config, self.store, builder)
+
+        # Check if merge should run
+        if trainer.should_merge():
+            self.store.append_event("evolution_merge_started", {"timestamp": utc_now()})
+            result = trainer.run_merge()
+
+            if result.success:
+                self.store.append_event("evolution_merge_completed", {
+                    "merge_id": result.merge_manifest.merge_id if result.merge_manifest else None,
+                    "timestamp": utc_now(),
+                })
+            else:
+                self.store.append_event("evolution_merge_failed", {
+                    "error": result.error_message,
+                    "timestamp": utc_now(),
+                })
+
+                # Check if we should generate a failure investigation task
+                if trainer.should_generate_merge_failure_task():
+                    from .task_generator.generator import TaskGenerator
+                    from .models import TaskQueueEntry
+
+                    generator = TaskGenerator(self.store)
+                    task = generator.generate_merge_failure_task(
+                        failure_count=trainer._get_consecutive_merge_failures(),
+                        last_error=result.error_message,
+                    )
+                    # Add to task queue
+                    entry = TaskQueueEntry(
+                        task_id=task.task_id,
+                        task=task,
+                        queued_at=utc_now(),
+                        status="pending",
+                    )
+                    self.store.append_to_queue(entry)
+                    trainer.reset_merge_failure_count()
 
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""

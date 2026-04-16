@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 import uuid
 
 from ..config import HomunculusConfig
@@ -10,12 +12,42 @@ from ..dataset_builder.builder import DatasetBuilder
 from ..models import AdapterManifest, EvaluationMetrics, utc_now
 from ..storage import ArtifactStore
 
+if TYPE_CHECKING:
+    from ..evolution.merge import MergeManager, MergeResult
+    from ..evolution.lineage import LineageTracker
+    from ..evolution.validation import MergeValidator
+
 
 class TrainingManager:
     def __init__(self, config: HomunculusConfig, store: ArtifactStore, builder: DatasetBuilder) -> None:
         self.config = config
         self.store = store
         self.builder = builder
+        # Lazy-loaded evolution components
+        self._merge_manager: "MergeManager | None" = None
+        self._lineage_tracker: "LineageTracker | None" = None
+        self._merge_validator: "MergeValidator | None" = None
+
+    @property
+    def merge_manager(self) -> "MergeManager":
+        if self._merge_manager is None:
+            from ..evolution.merge import MergeManager
+            self._merge_manager = MergeManager(self.config, self.store)
+        return self._merge_manager
+
+    @property
+    def lineage_tracker(self) -> "LineageTracker":
+        if self._lineage_tracker is None:
+            from ..evolution.lineage import LineageTracker
+            self._lineage_tracker = LineageTracker(self.config, self.store)
+        return self._lineage_tracker
+
+    @property
+    def merge_validator(self) -> "MergeValidator":
+        if self._merge_validator is None:
+            from ..evolution.validation import MergeValidator
+            self._merge_validator = MergeValidator(self.config)
+        return self._merge_validator
 
     def should_train_sft(self, new_verified_samples: int, last_successful_train_at: str | None, now: datetime | None = None) -> bool:
         if new_verified_samples >= self.config.thresholds.train_after_samples:
@@ -170,3 +202,87 @@ class TrainingManager:
             allowed = False
             reasons.append("training snapshot is missing")
         return allowed, reasons
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Evolution / Merge Integration
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_consecutive_merge_failures(self) -> int:
+        """Get consecutive merge failures from persistent state."""
+        state_file = self.config.paths.runtime_dir / "evolution_state.json"
+        if not state_file.exists():
+            return 0
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        return data.get("consecutive_merge_failures", 0)
+
+    def _set_consecutive_merge_failures(self, count: int) -> None:
+        """Persist consecutive merge failure count."""
+        state_file = self.config.paths.runtime_dir / "evolution_state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {"consecutive_merge_failures": count}
+        state_file.write_text(json.dumps(data), encoding="utf-8")
+
+    def should_merge(self) -> bool:
+        """Check if we should trigger a merge operation."""
+        if not self.config.evolution.enabled:
+            return False
+        return self.merge_manager.should_merge()
+
+    def run_merge(self) -> "MergeResult":
+        """Execute a merge operation with validation.
+
+        Returns:
+            MergeResult with success status and details
+        """
+        from ..evolution.merge import MergeResult
+
+        candidates = self.merge_manager.get_merge_candidates()
+        if not candidates:
+            return MergeResult(success=False, error_message="No candidates to merge")
+
+        # Execute merge
+        result = self.merge_manager.merge(candidates)
+
+        if not result.success:
+            self._set_consecutive_merge_failures(self._get_consecutive_merge_failures() + 1)
+            return result
+
+        # Validate the merge
+        manifest = result.merge_manifest
+        if manifest is None:
+            self._set_consecutive_merge_failures(self._get_consecutive_merge_failures() + 1)
+            return MergeResult(success=False, error_message="Merge succeeded but no manifest returned")
+
+        validation = self.merge_validator.validate(manifest)
+
+        if not validation.passed:
+            self._set_consecutive_merge_failures(self._get_consecutive_merge_failures() + 1)
+            manifest.status = "failed"
+            manifest.validation_results = validation.to_dict()
+            manifest.error_message = f"Validation failed: {validation.stages[-1].message}"
+            self.store.update_merge(manifest)
+            return MergeResult(
+                success=False,
+                error_message=manifest.error_message,
+                merge_manifest=manifest,
+            )
+
+        # Success! Record in lineage
+        manifest.status = "validated"
+        manifest.validation_results = validation.to_dict()
+        self.store.update_merge(manifest)
+
+        # Register in lineage
+        output_model_id = f"{manifest.target_base}-gen{self.lineage_tracker.get_current_generation() + 1}"
+        self.lineage_tracker.register_merge(manifest, output_model_id)
+
+        self._set_consecutive_merge_failures(0)  # Reset on success
+        return result
+
+    def should_generate_merge_failure_task(self) -> bool:
+        """Check if we should generate an introspection task for merge failures."""
+        return self._get_consecutive_merge_failures() >= self.config.evolution.max_merge_attempts
+
+    def reset_merge_failure_count(self) -> None:
+        """Reset the consecutive merge failure counter."""
+        self._set_consecutive_merge_failures(0)

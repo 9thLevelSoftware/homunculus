@@ -839,3 +839,60 @@ Investigate and improve the failing stage.
 
 ## Success Criteria
 Dominant failure stage percentage should decrease."""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Evolution / Merge Failure Tasks
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def generate_merge_failure_task(
+        self,
+        failure_count: int,
+        last_error: str | None = None,
+    ) -> GeneratedTask:
+        """Generate a task to investigate merge failures.
+
+        Called when merge operations fail consecutively, indicating
+        a systemic issue that needs investigation.
+
+        Args:
+            failure_count: Number of consecutive merge failures
+            last_error: The error message from the last failed merge
+
+        Returns:
+            GeneratedTask for investigating and fixing the merge pipeline
+        """
+        prompt = f"""# Investigate and Fix Recurring Merge Failures
+
+## Context
+- {failure_count} consecutive merge operations have failed
+- Last error: {last_error or 'Unknown'}
+
+## Analysis Needed
+1. Check merge configuration (backend, method, parameters)
+2. Verify LoRA adapter compatibility
+3. Check disk space and permissions for output directory
+4. Review validation criteria (may be too strict)
+5. Examine recent changes to evolution system
+
+## Files to Review
+- homunculus/evolution/merge.py
+- homunculus/evolution/validation.py
+- homunculus/config.py
+
+## Success Criteria
+Merge pipeline executes successfully and produces a validated merged model."""
+
+        return GeneratedTask(
+            task_id=f"merge-fix-{uuid.uuid4().hex[:8]}",
+            source="introspection",
+            prompt=prompt,
+            priority=0.9,  # High priority - blocks evolution
+            introspection_mode="merge_failure",
+            estimated_complexity="medium",
+            target_files=[
+                "homunculus/evolution/merge.py",
+                "homunculus/evolution/validation.py",
+                "homunculus/config.py",
+            ],
+            success_criteria="Merge pipeline executes successfully",
+        )

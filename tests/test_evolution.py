@@ -890,5 +890,288 @@ class LineageTrackerTests(unittest.TestCase):
         self.assertEqual(gen, 2)
 
 
+class ValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+
+        self.config = MagicMock()
+        self.config.canary_commands = None  # Use None instead of [] to match getattr behavior
+        self.config.evolution.validation_timeout_seconds = 30
+        self.config.evolution.coherence_prompt = "Test prompt"
+        self.config.evolution.coherence_min_tokens = 10
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_load_validation_fails_no_path(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path=None,
+        )
+
+        result = validator._validate_load(manifest)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.stage, "load")
+
+    def test_load_validation_fails_missing_dir(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path="/nonexistent/path",
+        )
+
+        result = validator._validate_load(manifest)
+        self.assertFalse(result.passed)
+
+    def test_load_validation_passes_with_files(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        # Create mock model directory
+        model_dir = self.temp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "model.safetensors").write_text("fake")
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path=str(model_dir),
+        )
+
+        result = validator._validate_load(manifest)
+        self.assertTrue(result.passed)
+
+    def test_canary_validation_skips_when_none(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path=str(self.temp_path),
+        )
+
+        result = validator._validate_canary(manifest)
+        self.assertTrue(result.passed)
+        self.assertIn("skipped", result.message.lower())
+
+    def test_is_repetitive_detects_loops(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        validator = MergeValidator(self.config)
+
+        # Non-repetitive
+        self.assertFalse(validator._is_repetitive(
+            "The quick brown fox jumps over the lazy dog."
+        ))
+
+        # Repetitive
+        self.assertTrue(validator._is_repetitive(
+            "the end the end the end the end the end the end the end"
+        ))
+
+    def test_load_validation_fails_missing_config(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        # Create mock model directory without config.json
+        model_dir = self.temp_path / "model_no_config"
+        model_dir.mkdir()
+        (model_dir / "model.safetensors").write_text("fake")
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path=str(model_dir),
+        )
+
+        result = validator._validate_load(manifest)
+        self.assertFalse(result.passed)
+        self.assertIn("config.json", result.message)
+
+    def test_load_validation_fails_no_weights(self):
+        from homunculus.evolution.validation import MergeValidator
+
+        # Create mock model directory without weight files
+        model_dir = self.temp_path / "model_no_weights"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+
+        validator = MergeValidator(self.config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=[],
+            target_base="model",
+            merge_method="linear",
+            output_path=str(model_dir),
+        )
+
+        result = validator._validate_load(manifest)
+        self.assertFalse(result.passed)
+        self.assertIn("weight", result.message.lower())
+
+
+class TrainingManagerEvolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+
+        self.config = MagicMock()
+        self.config.evolution.enabled = False
+        self.config.evolution.max_merge_attempts = 3
+        self.config.paths.runtime_dir = self.temp_path / "runtime"
+        self.config.paths.runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        self.store = MagicMock()
+        self.builder = MagicMock()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_should_merge_respects_config(self):
+        from homunculus.trainer.manager import TrainingManager
+
+        mgr = TrainingManager(self.config, self.store, self.builder)
+        self.assertFalse(mgr.should_merge())
+
+    def test_consecutive_failure_tracking(self):
+        from homunculus.trainer.manager import TrainingManager
+
+        self.config.evolution.enabled = True
+        mgr = TrainingManager(self.config, self.store, self.builder)
+
+        # Simulate failures using persistent storage
+        mgr._set_consecutive_merge_failures(2)
+        self.assertFalse(mgr.should_generate_merge_failure_task())
+
+        mgr._set_consecutive_merge_failures(3)
+        self.assertTrue(mgr.should_generate_merge_failure_task())
+
+        mgr.reset_merge_failure_count()
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 0)
+
+    def test_consecutive_failure_persists_to_file(self):
+        from homunculus.trainer.manager import TrainingManager
+
+        self.config.evolution.enabled = True
+        mgr = TrainingManager(self.config, self.store, self.builder)
+
+        # Set failures
+        mgr._set_consecutive_merge_failures(5)
+
+        # Create new manager instance to verify persistence
+        mgr2 = TrainingManager(self.config, self.store, self.builder)
+        self.assertEqual(mgr2._get_consecutive_merge_failures(), 5)
+
+
+class IntegrationTests(unittest.TestCase):
+    def test_full_validation_pipeline(self):
+        from homunculus.evolution.validation import MergeValidator, FullValidationResult
+
+        temp_dir = tempfile.TemporaryDirectory()
+        temp_path = Path(temp_dir.name)
+
+        # Create mock model
+        model_dir = temp_path / "merged"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "model.safetensors").write_text("fake")
+
+        config = MagicMock()
+        config.canary_commands = None
+        config.evolution.validation_timeout_seconds = 30
+        config.evolution.coherence_prompt = "Test"
+        config.evolution.coherence_min_tokens = 5
+
+        validator = MergeValidator(config)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=["lora1"],
+            target_base="model",
+            merge_method="linear",
+            output_path=str(model_dir),
+        )
+
+        # Full validation will fail at coherence (no real model)
+        # but load and canary should pass
+        result = validator.validate(manifest)
+
+        # Verify structure
+        self.assertIsInstance(result, FullValidationResult)
+        self.assertGreaterEqual(len(result.stages), 1)
+        self.assertEqual(result.stages[0].stage, "load")
+
+        temp_dir.cleanup()
+
+    def test_validation_result_to_dict(self):
+        from homunculus.evolution.validation import ValidationResult, FullValidationResult
+
+        stage = ValidationResult(
+            stage="load",
+            passed=True,
+            message="All good",
+            details={"files": ["a.bin"]},
+        )
+
+        full = FullValidationResult(passed=True, stages=[stage])
+        result_dict = full.to_dict()
+
+        self.assertTrue(result_dict["passed"])
+        self.assertEqual(len(result_dict["stages"]), 1)
+        self.assertEqual(result_dict["stages"][0]["stage"], "load")
+        self.assertEqual(result_dict["stages"][0]["message"], "All good")
+
+
+class TaskGeneratorMergeTests(unittest.TestCase):
+    def test_generate_merge_failure_task(self):
+        from homunculus.task_generator.generator import TaskGenerator
+
+        generator = TaskGenerator(store=None)
+        task = generator.generate_merge_failure_task(
+            failure_count=3,
+            last_error="mergekit not found",
+        )
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.source, "introspection")
+        self.assertEqual(task.introspection_mode, "merge_failure")
+        self.assertEqual(task.priority, 0.9)
+        self.assertIn("merge", task.task_id.lower())
+        self.assertIn("3", task.prompt)
+        self.assertIn("mergekit not found", task.prompt)
+
+    def test_generate_merge_failure_task_no_error(self):
+        from homunculus.task_generator.generator import TaskGenerator
+
+        generator = TaskGenerator(store=None)
+        task = generator.generate_merge_failure_task(
+            failure_count=5,
+            last_error=None,
+        )
+
+        self.assertIsNotNone(task)
+        self.assertIn("Unknown", task.prompt)
+        self.assertIn("5", task.prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
