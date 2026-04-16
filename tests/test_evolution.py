@@ -1892,5 +1892,196 @@ class MergekitYamlCorrectnessTests(unittest.TestCase):
         self.assertIn("OOM during merge", result.error_message or "")
 
 
+class RunMergeIntegrationTests(unittest.TestCase):
+    """End-to-end coverage for ``TrainingManager.run_merge``.
+
+    Phase 4's success criteria claimed ``run_merge`` was covered by tests,
+    but only its constituent pieces (``MergeManager.merge``,
+    ``MergeValidator.validate``, consecutive-failure tracking) were tested
+    individually. These tests exercise the full pipeline — candidates →
+    merge → validation → lineage / failure-counter bookkeeping — through
+    the public ``TrainingManager.run_merge`` entrypoint.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+
+        self.config = MagicMock()
+        self.config.evolution.enabled = True
+        self.config.evolution.max_merge_attempts = 3
+        self.config.paths.runtime_dir = self.tmp_path / "runtime"
+        self.config.paths.runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        self.store = MagicMock()
+        self.builder = MagicMock()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_manager(self):
+        from homunculus.trainer.manager import TrainingManager
+
+        mgr = TrainingManager(self.config, self.store, self.builder)
+        # Pre-populate the lazy slots with mocks so the properties never
+        # try to import or construct the real backends (MergeManager wants
+        # a real registry, LineageTracker wants real lineage files, etc.).
+        mgr._merge_manager = MagicMock()
+        mgr._merge_validator = MagicMock()
+        mgr._lineage_tracker = MagicMock()
+        return mgr
+
+    def _make_merge_manifest(self, merge_id: str = "merge-int") -> MergeManifest:
+        return MergeManifest(
+            merge_id=merge_id,
+            source_loras=["lora-a", "lora-b"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="linear",
+            output_path=str(self.tmp_path / merge_id),
+        )
+
+    def _make_lora(self, candidate_id: str = "lora-a") -> AdapterManifest:
+        return AdapterManifest(
+            model_id="qwen2.5-coder-1.5b",
+            base_model="qwen2.5-coder-1.5b",
+            adapter_path=str(self.tmp_path / candidate_id),
+            dataset_snapshot="snap",
+            snapshot_path=None,
+            trainer="mlx-lora",
+            metrics={},
+            status="promoted",
+            created_at="2026-04-16T12:00:00+00:00",
+            candidate_id=candidate_id,
+        )
+
+    def test_no_candidates_returns_failure_without_touching_counter(self):
+        from homunculus.evolution.merge import MergeResult as _MR  # noqa: F401
+
+        mgr = self._make_manager()
+        mgr._set_consecutive_merge_failures(1)
+        mgr._merge_manager.get_merge_candidates.return_value = []
+
+        result = mgr.run_merge()
+
+        self.assertFalse(result.success)
+        self.assertIn("No candidates", result.error_message or "")
+        # We short-circuit BEFORE invoking merge/validator, so the counter
+        # must not have been touched either up or down.
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 1)
+        mgr._merge_manager.merge.assert_not_called()
+        mgr._merge_validator.validate.assert_not_called()
+
+    def test_successful_merge_resets_failure_counter_and_registers_lineage(self):
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.evolution.validation import FullValidationResult
+
+        mgr = self._make_manager()
+        mgr._set_consecutive_merge_failures(2)
+
+        manifest = self._make_merge_manifest()
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=True,
+            merge_manifest=manifest,
+            output_path=manifest.output_path,
+        )
+        mgr._merge_validator.validate.return_value = FullValidationResult(
+            passed=True, stages=[]
+        )
+        mgr._lineage_tracker.get_current_generation.return_value = 1
+
+        result = mgr.run_merge()
+
+        self.assertTrue(result.success)
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 0)
+        # Manifest promoted to ``validated`` and persisted.
+        self.assertEqual(manifest.status, "validated")
+        self.store.update_merge.assert_called()
+        # Lineage registered with a generation-aware output id.
+        mgr._lineage_tracker.register_merge.assert_called_once()
+        register_args = mgr._lineage_tracker.register_merge.call_args
+        self.assertIs(register_args.args[0], manifest)
+        self.assertIn("gen2", register_args.args[1])
+
+    def test_merge_failure_increments_counter_and_returns_error(self):
+        from homunculus.evolution.merge import MergeResult
+
+        mgr = self._make_manager()
+        mgr._set_consecutive_merge_failures(1)
+
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=False, error_message="backend crashed"
+        )
+
+        result = mgr.run_merge()
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_message, "backend crashed")
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 2)
+        # Validator/lineage never run on a failed merge.
+        mgr._merge_validator.validate.assert_not_called()
+        mgr._lineage_tracker.register_merge.assert_not_called()
+
+    def test_validation_failure_increments_counter_and_marks_manifest(self):
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.evolution.validation import (
+            FullValidationResult,
+            ValidationResult,
+        )
+
+        mgr = self._make_manager()
+        mgr._set_consecutive_merge_failures(0)
+
+        manifest = self._make_merge_manifest("merge-bad")
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=True,
+            merge_manifest=manifest,
+            output_path=manifest.output_path,
+        )
+        mgr._merge_validator.validate.return_value = FullValidationResult(
+            passed=False,
+            stages=[
+                ValidationResult(stage="load", passed=True, message="loaded"),
+                ValidationResult(
+                    stage="coherence",
+                    passed=False,
+                    message="gibberish output",
+                ),
+            ],
+        )
+
+        result = mgr.run_merge()
+
+        self.assertFalse(result.success)
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 1)
+        # Manifest annotated with failure reason and persisted.
+        self.assertEqual(manifest.status, "failed")
+        self.assertIn("gibberish", manifest.error_message or "")
+        self.assertIn("stages", manifest.validation_results or {})
+        self.store.update_merge.assert_called()
+        # Validation failure must not promote the merge into lineage.
+        mgr._lineage_tracker.register_merge.assert_not_called()
+
+    def test_missing_manifest_on_success_is_treated_as_failure(self):
+        from homunculus.evolution.merge import MergeResult
+
+        mgr = self._make_manager()
+        mgr._set_consecutive_merge_failures(0)
+
+        mgr._merge_manager.get_merge_candidates.return_value = [self._make_lora()]
+        # Pathological backend: says it succeeded but didn't return a manifest.
+        mgr._merge_manager.merge.return_value = MergeResult(
+            success=True, merge_manifest=None, output_path="/tmp/x"
+        )
+
+        result = mgr.run_merge()
+
+        self.assertFalse(result.success)
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 1)
+        mgr._merge_validator.validate.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

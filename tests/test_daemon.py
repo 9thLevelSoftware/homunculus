@@ -1138,5 +1138,180 @@ class TaskQueuePersistenceTests(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class CheckEvolutionIntegrationTests(unittest.TestCase):
+    """Integration coverage for ``Daemon._check_evolution``.
+
+    Exercises the full merge-failure → counter → introspection-task chain
+    through a real daemon + real ArtifactStore, with only the trainer's
+    merge decisions stubbed. This hardens the contract that phase 4
+    claimed (and the previous test suite only partially validated):
+    consecutive merge failures must eventually materialize an
+    investigation task on the queue.
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _build_daemon(self, temp_path: Path) -> tuple[Daemon, ArtifactStore]:
+        repo_path = self._make_repo(temp_path)
+        config = load_config(self._config_path(temp_path, repo_path))
+        # The example config disables evolution; force it on so
+        # ``_check_evolution`` runs its body.
+        config.evolution.enabled = True
+        config.evolution.max_merge_attempts = 2
+        store = ArtifactStore(config)
+        store.ensure_layout()
+        daemon = Daemon(config, store=store)
+        return daemon, store
+
+    def test_no_merge_when_should_merge_false(self) -> None:
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            with patch.object(TrainingManager, "should_merge", return_value=False), \
+                 patch.object(TrainingManager, "run_merge") as run_merge:
+                daemon._check_evolution()
+
+            run_merge.assert_not_called()
+            # Nothing evolution-related should have been recorded.
+            self.assertEqual(len(store.load_queue()), 0)
+
+    def test_successful_merge_emits_completion_event(self) -> None:
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.models import MergeManifest
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            manifest = MergeManifest(
+                merge_id="merge-ok",
+                source_loras=["a", "b"],
+                target_base="m",
+                merge_method="linear",
+            )
+            with patch.object(TrainingManager, "should_merge", return_value=True), \
+                 patch.object(
+                     TrainingManager, "run_merge",
+                     return_value=MergeResult(success=True, merge_manifest=manifest),
+                 ), \
+                 patch.object(TrainingManager, "should_generate_merge_failure_task") as spawn:
+                daemon._check_evolution()
+
+            # Success path must not even consider enqueuing a failure task.
+            spawn.assert_not_called()
+            self.assertEqual(len(store.load_queue()), 0)
+
+    def test_check_evolution_enqueues_failure_task_at_threshold(self) -> None:
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            # Simulate: merge wanted, merge fails, threshold reached.
+            with patch.object(TrainingManager, "should_merge", return_value=True), \
+                 patch.object(
+                     TrainingManager, "run_merge",
+                     return_value=MergeResult(
+                         success=False, error_message="OOM during linear merge"
+                     ),
+                 ), \
+                 patch.object(
+                     TrainingManager, "should_generate_merge_failure_task",
+                     return_value=True,
+                 ), \
+                 patch.object(
+                     TrainingManager, "_get_consecutive_merge_failures",
+                     return_value=2,
+                 ), \
+                 patch.object(
+                     TrainingManager, "reset_merge_failure_count",
+                 ) as reset:
+                daemon._check_evolution()
+
+            # A merge-failure investigation task should now be on the
+            # queue with status="pending".
+            pending = store.load_queue()
+            self.assertTrue(
+                pending,
+                "Expected an investigation task to be enqueued after "
+                "reaching the merge-failure threshold, but queue is empty.",
+            )
+            matching = [e for e in pending if "merge" in e.task.task_id.lower()]
+            self.assertTrue(
+                matching,
+                "Expected a merge-related task on the queue; got task IDs "
+                f"{[e.task.task_id for e in pending]}",
+            )
+            self.assertEqual(matching[0].task.introspection_mode, "merge_failure")
+            self.assertIn("OOM during linear merge", matching[0].task.prompt)
+            # Counter reset must only happen AFTER successful enqueue.
+            reset.assert_called_once()
+
+    def test_failure_counter_not_reset_when_enqueue_fails(self) -> None:
+        """Regression: disk-full / permission error while enqueuing the
+        merge-failure investigation task must not silently zero the
+        counter. Otherwise the introspection trigger dies forever and
+        the merge failure goes uninvestigated on the next cycle.
+        """
+        from homunculus.evolution.merge import MergeResult
+        from homunculus.trainer.manager import TrainingManager
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            with patch.object(TrainingManager, "should_merge", return_value=True), \
+                 patch.object(
+                     TrainingManager, "run_merge",
+                     return_value=MergeResult(
+                         success=False, error_message="boom"
+                     ),
+                 ), \
+                 patch.object(
+                     TrainingManager, "should_generate_merge_failure_task",
+                     return_value=True,
+                 ), \
+                 patch.object(
+                     TrainingManager, "_get_consecutive_merge_failures",
+                     return_value=3,
+                 ), \
+                 patch.object(
+                     TrainingManager, "reset_merge_failure_count",
+                 ) as reset, \
+                 patch.object(
+                     ArtifactStore, "append_to_queue",
+                     side_effect=OSError("disk full"),
+                 ):
+                # Should not raise — the daemon swallows the enqueue error.
+                daemon._check_evolution()
+
+            # Counter must NOT have been reset.
+            reset.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
