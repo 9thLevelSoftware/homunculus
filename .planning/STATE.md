@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 4 of 5 (Weight Evolution)
-- **Status**: Phase 4 complete — review passed; all deferred items resolved (`fix/spec-alignment`, 28 commits)
-- **Last Activity**: Resolved 4 previously-deferred review items — atomic update_merge, background merge worker, intermediate "merged" status, incremental lineage cache (2026-04-16)
+- **Phase**: 5 of 5 (Full Autonomy) — partial (2/3 plans complete; 05-03 blocked at throughput gate)
+- **Status**: Phase 5 tooling landed — autonomy/ package + CLI + 308 tests passing. Soak run (05-03) BLOCKED at throughput pre-check: `traces/episodes.jsonl` empty → projected_loras_merged_7d=0.0 (below 1.0 floor). Operator must bootstrap episode history OR lower evolution thresholds before Session 1 restart.
+- **Last Activity**: Phase 5 build — Waves 1+2 complete, Wave 3 gate refusal (2026-04-16)
 
 ## Progress
 ```
-[#################...] 100% — 17/17 plans complete (Phase 0-4 done)
+[###################.] 19/20 — Phase 0-4 complete; Phase 5: 05-01 + 05-02 landed, 05-03 blocked at throughput gate
 ```
 
 ## Completed Work
@@ -186,7 +186,45 @@ suite grew from 230 → 286 tests, all passing. Details in the plan
 `docs/superpowers/plans/2026-04-16-spec-alignment-and-merge-correctness.md`
 and the review doc above.
 
+## Phase 5 Plan Summary
+
+| Plan | Wave | Title | Lead Agent | Secondary |
+|------|------|-------|-----------|-----------|
+| 05-01 | 1 | Autonomy Package + Watchdog | Senior Developer | Infrastructure Maintainer |
+| 05-02 | 2 | Preflight + Acceptance + CLI + Tests | Senior Developer | QA Verification Specialist |
+| 05-03 | 3 | Soak Run + Acceptance Report + Sign-off | QA Verification Specialist | Reality Checker |
+
+### Architecture Selected
+Proposal C (Clean) — new `homunculus/autonomy/` package matching Phase 2/3/4 package pattern. Proposals M/P rejected: M entangles watchdog with daemon state (bad signal separation); P too dense for terminal phase needing clear acceptance surface.
+
+### Spec
+`.planning/specs/05-full-autonomy-spec.md` — 6 success criteria (SC1-SC6) mapped to measurement sources, full data contracts (6 dataclasses), watchdog semantics, CLI contracts, testing strategy.
+
+### Auto-Refine Applied (1 cycle)
+Critical findings fixed:
+- Plan 05-03-1: Throughput pre-check prevents SC3 data-starvation (computes projected LoRA merges over soak window, adjusts thresholds or extends duration)
+- Plan 05-03-1: Explicit wall-clock execution model (daemonize + schedule daily checks + yield); agent does NOT block 7 days
+- Plan 05-02-3: Atomic-persistence test reframed as property-based invariant (not fault injection)
+- Plan 05-01-3: Daemon integration point discovery via grep + minimal helper fallback
+
+## Phase 5 Build Results
+
+| Plan | Wave | Status | Commit | Notes |
+|------|------|--------|--------|-------|
+| 05-01 | 1 | Complete | `a5502e7` | autonomy/ package, 6 dataclasses, reporter, watchdog, daemon integration; 293 tests passing |
+| 05-02 | 2 | Complete | `c27353d` | preflight (7 gates), acceptance (6 criteria), 3 CLI subcommands, 15 new tests (308 total) |
+| 05-03 | 3 | **BLOCKED** | `63ef4d5` | SOAK-PROTOCOL.md written; throughput gate refused start (episodes.jsonl empty → 0 LoRA projection for 7-day window) |
+
+## Phase 5 Blocker — Throughput Gate
+
+Per `.planning/phases/05-full-autonomy/SOAK-PROTOCOL.md` §2.2, QA refused to start the 7-day soak because projected_loras_merged_7d=0.0 would guarantee SC3 failure. Baseline capture in `soak-log/day-00-baseline.json`. Operator options documented in `05-03-SUMMARY.md`:
+
+1. Bootstrap episode history — run 5-10 real episodes manually to populate `traces/episodes.jsonl`, then re-run gate.
+2. Lower `[evolution].auto_train_after_samples` (50→10) AND `auto_merge_after_loras` (5→2) in `homunculus.toml`, then re-run gate.
+3. Combination of both.
+
+After gate clears: re-run `/legion:build` (or invoke the QA agent directly) to start the soak. Session 2 (05-03-2 acceptance report + 05-03-3 sign-off) resumes after ≥7-day wall-clock elapses.
+
 ## Next Action
 
-Phase 4 complete and reviewed. Run `/legion:plan 5` to plan Phase 5:
-Full Autonomy.
+Operator decision required: pick option 1, 2, or 3 above to clear the throughput gate. Once cleared, re-run `/legion:build --phase 5` to resume Wave 3.
