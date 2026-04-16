@@ -1770,5 +1770,123 @@ class MLXMergeMathTests(unittest.TestCase):
         )
 
 
+class MergekitYamlCorrectnessTests(unittest.TestCase):
+    """mergekit-yaml cannot consume PEFT adapter directories directly.
+
+    The ``linear``/``ties``/``dare_ties`` methods expect full model
+    checkpoints with ``config.json`` + ``model.safetensors``. Previously
+    ``_generate_mergekit_config`` wrote adapter paths straight into the
+    YAML, which would fail at runtime when mergekit tried to look up
+    the base-model config. These tests assert the corrected flow: each
+    LoRA is baked into a full checkpoint via PEFT's ``merge_and_unload``
+    first, and the YAML references those baked paths.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.tmp.name)
+        self.config = MagicMock()
+        self.config.evolution.merge_backend = "mergekit"
+        self.config.evolution.auto_merge_after_loras = 3
+        self.config.evolution.validation_timeout_seconds = 300
+        self.config.paths.models_dir = self.temp_path / "models"
+        self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
+        self.store = MagicMock()
+        self.store.load_registry.return_value = {"candidates": [], "history": []}
+        self.store.load_merges.return_value = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_manager(self):
+        from homunculus.evolution.merge import MergeManager
+        return MergeManager(self.config, self.store)
+
+    def _lora(self, candidate_id: str, adapter_path: str) -> AdapterManifest:
+        return AdapterManifest(
+            model_id="model",
+            base_model="Qwen/Qwen2.5-Coder-3B",
+            adapter_path=adapter_path,
+            dataset_snapshot=f"snap-{candidate_id}",
+            snapshot_path=None,
+            trainer="mlx-lm",
+            metrics={},
+            status="promoted",
+            created_at="2024-01-01",
+            candidate_id=candidate_id,
+        )
+
+    def test_mergekit_yaml_references_baked_checkpoints_not_adapters(self):
+        """mergekit-yaml must see full model paths, not adapter dirs."""
+        import subprocess as _subprocess
+        import yaml
+
+        mgr = self._make_manager()
+        adapter_1 = str(self.temp_path / "lora-1")
+        baked_1 = str(self.temp_path / "baked" / "lora-1")
+        loras = [self._lora("lora-1", adapter_1)]
+        manifest = MergeManifest(
+            merge_id="merge-test",
+            source_loras=["lora-1"],
+            target_base="Qwen/Qwen2.5-Coder-3B",
+            merge_method="linear",
+        )
+
+        captured = {"yaml_text": None, "argv": None}
+
+        def fake_run(cmd, **kwargs):
+            captured["argv"] = list(cmd)
+            cfg_path = next(
+                (a for a in cmd if a.endswith((".yaml", ".yml"))),
+                None,
+            )
+            if cfg_path:
+                captured["yaml_text"] = Path(cfg_path).read_text(encoding="utf-8")
+            return _subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("homunculus.evolution.merge.subprocess.run", side_effect=fake_run), \
+             patch.object(mgr, "_bake_lora_into_base", return_value=baked_1) as bake:
+            result = mgr._merge_with_mergekit(manifest, loras)
+
+        self.assertTrue(result.success, f"expected success, got {result.error_message}")
+        bake.assert_called_once()
+        self.assertIsNotNone(captured["yaml_text"], "YAML not captured — argv has no .yaml file")
+
+        doc = yaml.safe_load(captured["yaml_text"])
+        model_strs = [m.get("model") for m in doc.get("models", [])]
+        # Baked path MUST appear as one of the models.
+        self.assertIn(baked_1, model_strs,
+                      f"Baked path missing from YAML models. Got: {model_strs}")
+        # Raw adapter path MUST NOT appear as a model.
+        self.assertNotIn(adapter_1, model_strs,
+                         f"Raw adapter path leaked into YAML: {model_strs}")
+
+    def test_mergekit_nonzero_exit_propagates_stderr(self):
+        """A mergekit failure must surface the subprocess stderr to the caller."""
+        import subprocess as _subprocess
+
+        mgr = self._make_manager()
+        loras = [self._lora("lora-1", str(self.temp_path / "lora-1"))]
+        manifest = MergeManifest(
+            merge_id="merge-fail",
+            source_loras=["lora-1"],
+            target_base="Qwen/Qwen2.5-Coder-3B",
+            merge_method="linear",
+        )
+        fake = _subprocess.CompletedProcess(
+            args=["mergekit-yaml"],
+            returncode=2,
+            stdout="",
+            stderr="OOM during merge",
+        )
+        with patch("homunculus.evolution.merge.subprocess.run", return_value=fake), \
+             patch.object(mgr, "_bake_lora_into_base",
+                          return_value=str(self.temp_path / "baked")):
+            result = mgr._merge_with_mergekit(manifest, loras)
+
+        self.assertFalse(result.success)
+        self.assertIn("OOM during merge", result.error_message or "")
+
+
 if __name__ == "__main__":
     unittest.main()

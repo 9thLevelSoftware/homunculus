@@ -178,7 +178,22 @@ class MergeManager:
         manifest: MergeManifest,
         loras: list[AdapterManifest],
     ) -> MergeResult:
-        """Merge LoRAs using mergekit."""
+        """Merge LoRAs via mergekit, after baking each adapter into a full checkpoint.
+
+        mergekit-yaml's ``linear``/``ties``/``dare_ties`` methods cannot
+        consume PEFT adapter directories directly — they need full model
+        checkpoints with ``config.json`` + weights. We therefore:
+
+        1. Call :meth:`_bake_lora_into_base` per LoRA to materialize it
+           via ``peft.PeftModel.from_pretrained(...).merge_and_unload()``.
+           This produces a full checkpoint on disk.
+        2. Feed those baked paths into the mergekit YAML.
+        3. Invoke ``mergekit-yaml`` to produce the final merged model.
+
+        Baking dominates wall time (it has to load base + adapter,
+        matmul the update, save), so results are cached per-candidate
+        in ``<models_dir>/baked/<candidate_id>``.
+        """
         try:
             import yaml
         except ImportError:
@@ -189,30 +204,40 @@ class MergeManager:
 
         import tempfile
 
-        # Prepare output directory
         models_dir = self.config.paths.models_dir
         output_dir = models_dir / "merged" / manifest.merge_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize before try so the finally can run safely even if
-        # config generation or temp-file creation raises.
         config_path: str | None = None
         try:
-            # Generate mergekit config YAML
-            config = self._generate_mergekit_config(manifest, loras)
+            # Step 1: bake each LoRA into a full checkpoint. A single
+            # bake failure aborts the merge — partial results are useless.
+            baked_paths: list[str] = []
+            for lora in loras:
+                try:
+                    baked_paths.append(self._bake_lora_into_base(lora))
+                except Exception as exc:
+                    return MergeResult(
+                        success=False,
+                        error_message=(
+                            f"Failed to bake LoRA {lora.candidate_id or lora.adapter_path}: {exc}"
+                        ),
+                    )
+
+            config = self._generate_mergekit_config_for_baked(
+                manifest, loras, baked_paths,
+            )
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
                 yaml.safe_dump(config, f)
                 config_path = f.name
 
-            # Run mergekit-yaml
             cmd = [
                 "mergekit-yaml",
                 config_path,
                 str(output_dir),
                 "--copy-tokenizer",
             ]
-
             if manifest.merge_method == "ties":
                 cmd.extend(["--allow-crimes"])
 
@@ -242,39 +267,149 @@ class MergeManager:
         except subprocess.TimeoutExpired:
             return MergeResult(
                 success=False,
-                error_message=f"mergekit timed out after {self.config.evolution.validation_timeout_seconds}s",
+                error_message=(
+                    f"mergekit timed out after "
+                    f"{self.config.evolution.validation_timeout_seconds}s"
+                ),
             )
         finally:
             if config_path is not None:
                 Path(config_path).unlink(missing_ok=True)
+
+    def _bake_lora_into_base(self, lora: AdapterManifest) -> str:
+        """Materialize a LoRA into a full checkpoint via PEFT's merge_and_unload.
+
+        Returns the absolute path to the baked checkpoint directory.
+        Results are cached per-candidate under
+        ``<models_dir>/baked/<candidate_id>`` — re-baking the same adapter
+        across merges is wasteful (and the base model alone can be 3GB+).
+
+        Raises:
+            RuntimeError: If peft/transformers/torch aren't installed.
+                Callers should treat this as a hard failure rather than
+                trying the merge without baking (which will produce wrong
+                results from mergekit).
+        """
+        try:
+            import torch
+            from peft import PeftModel
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Mergekit backend requires peft + transformers + torch. "
+                f"Install with: pip install peft transformers torch ({exc})"
+            )
+
+        candidate_id = lora.candidate_id or Path(lora.adapter_path).name
+        out_dir = self.config.paths.models_dir / "baked" / candidate_id
+        if out_dir.exists() and (out_dir / "config.json").exists():
+            logger.info("Reusing baked checkpoint for %s at %s", candidate_id, out_dir)
+            return str(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Baking LoRA %s into base %s", candidate_id, lora.base_model)
+        base = AutoModelForCausalLM.from_pretrained(
+            lora.base_model, torch_dtype=torch.bfloat16,
+        )
+        peft_model = PeftModel.from_pretrained(base, lora.adapter_path)
+        merged = peft_model.merge_and_unload()
+        merged.save_pretrained(str(out_dir))
+        AutoTokenizer.from_pretrained(lora.base_model).save_pretrained(str(out_dir))
+
+        del base, peft_model, merged
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return str(out_dir)
+
+    def _generate_mergekit_config_for_baked(
+        self,
+        manifest: MergeManifest,
+        loras: list[AdapterManifest],
+        baked_paths: list[str],
+    ) -> dict[str, Any]:
+        """Generate mergekit YAML using baked (full-checkpoint) paths.
+
+        Because every LoRA is already baked into its base, mergekit sees
+        only full model checkpoints — no ``lora:`` keying is required
+        and the merge methods behave as documented.
+        """
+        if len(loras) != len(baked_paths):
+            raise ValueError(
+                f"baked_paths length ({len(baked_paths)}) must equal "
+                f"loras length ({len(loras)})"
+            )
+        base_model = loras[0].base_model
+
+        if manifest.merge_method == "linear":
+            # Equal average of all baked checkpoints. The base alone is
+            # NOT included — the baked checkpoints already contain the
+            # base weights (just with per-LoRA deltas added).
+            weight = 1.0 / len(baked_paths)
+            return {
+                "merge_method": "linear",
+                "models": [
+                    {"model": p, "parameters": {"weight": weight}}
+                    for p in baked_paths
+                ],
+                "dtype": "bfloat16",
+            }
+
+        if manifest.merge_method == "ties":
+            return {
+                "merge_method": "ties",
+                "base_model": base_model,
+                "models": [
+                    {"model": p, "parameters": {"density": 0.5, "weight": 1.0}}
+                    for p in baked_paths
+                ],
+                "dtype": "bfloat16",
+                "parameters": {"normalize": True},
+            }
+
+        if manifest.merge_method == "dare_ties":
+            return {
+                "merge_method": "dare_ties",
+                "base_model": base_model,
+                "models": [
+                    {"model": p, "parameters": {"density": 0.5, "weight": 1.0}}
+                    for p in baked_paths
+                ],
+                "dtype": "bfloat16",
+                "parameters": {"normalize": True},
+            }
+
+        raise ValueError(f"Unknown merge method: {manifest.merge_method}")
 
     def _generate_mergekit_config(
         self,
         manifest: MergeManifest,
         loras: list[AdapterManifest],
     ) -> dict[str, Any]:
-        """Generate mergekit YAML config for the merge."""
+        """Legacy config generator kept for backward-compatible tests.
+
+        Production flow uses :meth:`_generate_mergekit_config_for_baked`
+        with baked full checkpoints. This helper still writes adapter
+        paths directly and is retained only so pre-Task-19 tests that
+        call it explicitly continue to pass (they don't execute mergekit).
+        New callers should not use this.
+        """
         base_model = loras[0].base_model
 
-        # Linear merge: weighted average of base + all LoRAs
         if manifest.merge_method == "linear":
             lora_weight = 1.0 / len(loras)
-
             models = [{"model": base_model, "parameters": {"weight": 0.5}}]
             for lora in loras:
                 models.append({
                     "model": lora.adapter_path,
-                    "parameters": {"weight": lora_weight * 0.5}
+                    "parameters": {"weight": lora_weight * 0.5},
                 })
-
             return {
                 "merge_method": "linear",
                 "models": models,
                 "dtype": "bfloat16",
             }
 
-        # TIES merge: resolve interference between LoRAs
-        elif manifest.merge_method == "ties":
+        if manifest.merge_method == "ties":
             return {
                 "merge_method": "ties",
                 "base_model": base_model,
@@ -286,8 +421,7 @@ class MergeManager:
                 "parameters": {"normalize": True},
             }
 
-        # DARE: Drop And REscale
-        elif manifest.merge_method == "dare_ties":
+        if manifest.merge_method == "dare_ties":
             return {
                 "merge_method": "dare_ties",
                 "base_model": base_model,
