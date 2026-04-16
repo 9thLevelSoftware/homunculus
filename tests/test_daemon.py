@@ -973,5 +973,170 @@ class DaemonE2EIntrospectionToTaskTests(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class TaskQueuePersistenceTests(unittest.TestCase):
+    """Daemon must persist generated tasks to the queue so restart can resume.
+
+    Regression: ``get_pending_tasks`` bypassed the queue entirely; only the
+    merge-failure path in ``_check_evolution`` enqueued. If the daemon
+    crashed mid-cycle (or SIGTERM was honored before completion),
+    in-progress tasks were lost — the queue infrastructure existed since
+    Plan 03-01 but was unused for the normal flow.
+
+    These tests assert the invariant: every task returned by
+    ``get_pending_tasks`` is durably persisted before execution, and
+    completed entries flow to ``task_history.jsonl`` after the cycle.
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _build_daemon(
+        self, temp_path: Path, orch_outcome: str = "accepted"
+    ) -> tuple[Daemon, ArtifactStore, Path]:
+        """Build a daemon with one suggestion-derived task ready to dispatch.
+
+        Introspection is disabled so the only task source is the seeded
+        suggestion file — keeps the test focused on the queue contract,
+        not on introspection-driven generation (which is exercised by
+        ``DaemonE2EIntrospectionToTaskTests``).
+        Evolution is disabled so ``_check_evolution`` doesn't intercept.
+        """
+        config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+        config.introspection.enabled = False
+        config.evolution.enabled = False
+
+        # Seed a single suggestion so get_pending_tasks has something to
+        # generate-and-enqueue on the first call.
+        suggestions_dir = temp_path / "suggestions"
+        suggestions_dir.mkdir(parents=True, exist_ok=True)
+        (suggestions_dir / "test-task.md").write_text(
+            "# Test Task\n\n## Priority\nHIGH\n\n## What\nAdd a comment to file.py\n",
+            encoding="utf-8",
+        )
+
+        store = ArtifactStore(config)
+        store.ensure_layout()
+
+        episode = MagicMock()
+        episode.outcome = orch_outcome
+        episode.episode_id = "ep-1"
+        orchestrator = MagicMock()
+        orchestrator.run_episode.return_value = episode
+
+        daemon = Daemon(
+            config,
+            orchestrator=orchestrator,
+            suggestions_dir=suggestions_dir,
+            store=store,
+        )
+        return daemon, store, suggestions_dir
+
+    def test_get_pending_tasks_persists_to_queue(self) -> None:
+        """Each task returned by get_pending_tasks must land in the queue.
+
+        Without this, a crash between get_pending_tasks() and the
+        orchestrator call would silently lose work — the suggestion file
+        is the only durability and it's only archived AFTER execution.
+        """
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store, _ = self._build_daemon(temp_path)
+
+            tasks = daemon.get_pending_tasks()
+            self.assertGreater(
+                len(tasks), 0,
+                "Test setup invariant: seeded suggestion should yield >=1 task",
+            )
+
+            queue_entries = store.load_queue()  # status="pending" only
+            queued_ids = {e.task_id for e in queue_entries}
+            for task in tasks:
+                self.assertIn(
+                    task.task_id, queued_ids,
+                    f"Task {task.task_id} returned by get_pending_tasks but "
+                    f"not persisted to queue. Restart-safety broken.",
+                )
+
+    def test_completed_tasks_archived_after_cycle(self) -> None:
+        """After run_once, no completed entries linger in the pending queue.
+
+        Asserts the end-of-cycle archive sweep moves completed/failed
+        entries to task_history.jsonl, keeping the live queue bounded.
+        """
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store, _ = self._build_daemon(temp_path, orch_outcome="accepted")
+
+            result = daemon.run_once()
+            self.assertEqual(
+                result.status, "executed",
+                f"Cycle should execute the seeded task, got {result.status} "
+                f"(error={result.error})",
+            )
+            self.assertGreaterEqual(result.tasks_executed, 1)
+
+            pending = store.load_queue()
+            self.assertEqual(
+                len(pending), 0,
+                f"After cycle, pending queue should be empty (completed "
+                f"entries archived); got {len(pending)} stragglers: "
+                f"{[(e.task_id, e.status) for e in pending]}",
+            )
+
+    def test_pending_queue_picked_up_on_restart(self) -> None:
+        """A queue entry left over from a prior cycle is picked up first.
+
+        Simulates the restart-after-crash scenario: pre-seed a pending
+        entry whose suggestion file no longer exists. A fresh daemon
+        instance must still dispatch it — the queue is the source of
+        truth for in-flight work, not the suggestions directory.
+        """
+        from homunculus.models import TaskQueueEntry, utc_now as _utc_now
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store, suggestions_dir = self._build_daemon(temp_path)
+
+            # Pre-seed a queue entry with no matching suggestion file.
+            stranded_task = GeneratedTask(
+                task_id="stranded-1",
+                source="user",
+                prompt="Survived a crash; please resume me.",
+                priority=0.9,
+                context={"filename": "stranded.md"},  # file does NOT exist
+            )
+            store.append_to_queue(TaskQueueEntry(
+                task_id=stranded_task.task_id,
+                task=stranded_task,
+                queued_at=_utc_now(),
+                status="pending",
+            ))
+
+            tasks = daemon.get_pending_tasks()
+            returned_ids = {t.task_id for t in tasks}
+            self.assertIn(
+                "stranded-1", returned_ids,
+                f"Pre-seeded queue entry was not picked up on restart. "
+                f"Got task IDs={returned_ids}. Restart-safety broken.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

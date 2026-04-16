@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import HomunculusConfig, load_config
-from .models import DaemonState, GeneratedTask, utc_now
+from .models import DaemonState, GeneratedTask, TaskQueueEntry, utc_now
 from .suggestions import SuggestionReader
 from .task_generator import TaskGenerator, TaskPrioritizer
 
@@ -254,23 +254,82 @@ class Daemon:
             logger.warning("Failed to load introspection results: %s", e)
             return []
 
+    def _mark_queue_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        outcome: str | None = None,
+        last_error: str | None = None,
+        increment_attempts: bool = False,
+    ) -> None:
+        """Update a task's queue entry, swallowing storage errors.
+
+        Queue persistence is a best-effort restart-safety mechanism, not
+        a correctness guarantee. If the write fails (disk full, race),
+        the daemon still finishes the cycle rather than crashing. The
+        worst case is that a duplicate entry gets re-dispatched on
+        restart, which is safe because episode execution is idempotent
+        per task_id (the task runner re-derives workspace state).
+        """
+        if self.store is None:
+            return
+        try:
+            self.store.update_queue_entry(
+                task_id,
+                status=status,
+                outcome=outcome,
+                last_error=last_error,
+                increment_attempts=increment_attempts,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update queue status for task %s (status=%s): %s",
+                task_id, status, exc,
+            )
+
+    def _archive_queue_safely(self) -> None:
+        """Sweep completed/failed entries to history; swallow errors."""
+        if self.store is None:
+            return
+        try:
+            self.store.archive_completed_tasks()
+        except Exception as exc:
+            logger.warning("Failed to archive completed queue entries: %s", exc)
+
     def get_pending_tasks(self) -> list[GeneratedTask]:
-        """Get all pending tasks from introspection and suggestions.
+        """Get all pending tasks from the queue, introspection, and suggestions.
 
-        Combines tasks from three sources:
-        1. Generated from introspection insights (if store available)
-        2. User suggestions with resonance scoring (if introspection available)
-        3. Plain user suggestions (fallback)
-
-        All tasks are then ranked by the prioritizer using alignment,
-        complexity, and freshness factors.
+        Restart-safe flow:
+        1. Load any ``status="pending"`` entries from the task queue — these
+           are in-flight tasks that survived a crash, SIGTERM, or clean
+           shutdown between cycles. They take precedence because the
+           originating suggestion file may already be archived (or may
+           never have existed, e.g. introspection-generated tasks).
+        2. Generate fresh tasks from introspection + suggestion sources.
+        3. Persist every fresh task (not already in the queue) to
+           ``runtime/task_queue.jsonl`` BEFORE returning. De-duplicate by
+           ``task_id`` so re-reading the same suggestion file across
+           cycles doesn't create duplicate queue entries.
+        4. Prioritize the combined set and return.
 
         Returns:
-            Prioritized list of GeneratedTask objects
+            Prioritized list of GeneratedTask objects. Every returned
+            task has a persisted queue entry with status="pending".
         """
         introspection_results = self._get_recent_introspection()
 
-        # Generate tasks from introspection if we have a generator and results
+        # Step 1: surface queued-but-not-yet-executed tasks first.
+        queued_tasks: list[GeneratedTask] = []
+        queued_ids: set[str] = set()
+        if self.store is not None:
+            try:
+                queued_tasks = [e.task for e in self.store.load_queue()]
+                queued_ids = {t.task_id for t in queued_tasks}
+            except Exception as exc:
+                logger.warning("Failed to load task queue: %s", exc)
+
+        # Step 2: generate fresh tasks from introspection (if any)
         generated: list[GeneratedTask] = []
         if self.task_generator and introspection_results:
             try:
@@ -281,7 +340,8 @@ class Daemon:
             except Exception as e:
                 logger.warning("Failed to generate introspection tasks: %s", e)
 
-        # Read suggestions with resonance boost if we have introspection context
+        # Step 2 (cont'd): read suggestions, with resonance boost if we
+        # have introspection context.
         if introspection_results:
             suggestions = self.suggestion_reader.read_pending_with_resonance(
                 introspection_results
@@ -289,8 +349,39 @@ class Daemon:
         else:
             suggestions = self.suggestion_reader.read_pending()
 
-        # Combine and prioritize all tasks
-        all_tasks = generated + suggestions
+        fresh_tasks = generated + suggestions
+
+        # Step 3: persist fresh tasks (skip duplicates already queued).
+        if self.store is not None:
+            now = utc_now()
+            for task in fresh_tasks:
+                if task.task_id in queued_ids:
+                    continue
+                entry = TaskQueueEntry(
+                    task_id=task.task_id,
+                    task=task,
+                    queued_at=now,
+                    status="pending",
+                )
+                try:
+                    self.store.append_to_queue(entry)
+                    queued_ids.add(task.task_id)
+                except Exception as exc:
+                    # If persistence fails, we still execute the task —
+                    # better to make forward progress than to drop work —
+                    # but log loudly so operators notice restart-safety
+                    # has degraded.
+                    logger.warning(
+                        "Failed to enqueue task %s: %s (executing without "
+                        "queue persistence; restart-safety degraded)",
+                        task.task_id, exc,
+                    )
+
+        # Step 4: prioritize queued + fresh (de-duplicated by task_id,
+        # fresh tasks win so their newer priority/metadata is used).
+        fresh_ids = {t.task_id for t in fresh_tasks}
+        carry_over = [t for t in queued_tasks if t.task_id not in fresh_ids]
+        all_tasks = carry_over + fresh_tasks
         return self.prioritizer.prioritize(all_tasks, introspection_results)
 
     def run_once(self) -> DaemonCycleResult:
@@ -317,6 +408,13 @@ class Daemon:
             if self.shutdown_requested:
                 break
 
+            # Mark in_progress + bump attempts BEFORE execution so a crash
+            # mid-episode leaves an honest record (attempts=N, status=in_progress)
+            # rather than the pre-crash "pending" illusion.
+            self._mark_queue_status(
+                task.task_id, status="in_progress", increment_attempts=True,
+            )
+
             try:
                 task_request = task.to_task_request(target_workspace)
                 episode = self.orchestrator.run_episode(task_request)
@@ -326,6 +424,13 @@ class Daemon:
                     accepted += 1
                 elif outcome == "reverted":
                     reverted += 1
+                # Mark queue entry completed with the episode outcome. Even
+                # outcomes like "blocked" or "error" are terminal from the
+                # queue's perspective — the task ran, produced a verdict,
+                # and should not be re-dispatched.
+                self._mark_queue_status(
+                    task.task_id, status="completed", outcome=outcome or None,
+                )
                 # Archive on EVERY terminal outcome so poison inputs (blocked
                 # by guardrails, or orchestrator errors) don't loop forever
                 # in the suggestions queue. Wrapped in try/except so an
@@ -342,6 +447,12 @@ class Daemon:
                                 filename, outcome, exc,
                             )
             except Exception as e:
+                # Orchestrator raised — mark the task failed so it doesn't
+                # loop (it already consumed an attempts++), then bail out.
+                self._mark_queue_status(
+                    task.task_id, status="failed", last_error=str(e),
+                )
+                self._archive_queue_safely()
                 return DaemonCycleResult(
                     status="error",
                     tasks_executed=executed,
@@ -350,8 +461,15 @@ class Daemon:
                     error=str(e),
                 )
 
-        # After episodes complete, check evolution
+        # After episodes complete, check evolution (which may enqueue
+        # merge-failure investigation tasks of its own — those stay
+        # "pending" for the next cycle).
         self._check_evolution()
+
+        # Sweep completed/failed entries to task_history.jsonl so the
+        # live queue stays bounded and restarts only replay truly
+        # in-flight work.
+        self._archive_queue_safely()
 
         return DaemonCycleResult(
             status="executed",
