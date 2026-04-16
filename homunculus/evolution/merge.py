@@ -88,7 +88,7 @@ class MergeManager:
         else:
             promoted_since = promoted
 
-        return len(promoted_since) >= self.config.evolution.merge_after_loras
+        return len(promoted_since) >= self.config.evolution.auto_merge_after_loras
 
     def get_merge_candidates(self) -> list[AdapterManifest]:
         """Get the LoRAs that should be merged."""

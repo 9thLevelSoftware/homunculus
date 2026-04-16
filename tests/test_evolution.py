@@ -12,11 +12,14 @@ class EvolutionInfrastructureTests(unittest.TestCase):
     def test_evolution_settings_defaults(self):
         settings = EvolutionSettings()
         self.assertTrue(settings.enabled)
-        self.assertEqual(settings.merge_after_loras, 3)
+        self.assertEqual(settings.auto_merge_after_loras, 5)
         self.assertEqual(settings.max_merge_attempts, 3)
         self.assertEqual(settings.merge_backend, "auto")
         self.assertEqual(settings.validation_timeout_seconds, 300)
-        self.assertEqual(settings.coherence_prompt, "Explain what you are and what you do.")
+        self.assertEqual(
+            settings.coherence_prompt,
+            "Write a Python function that returns the nth Fibonacci number.",
+        )
         self.assertEqual(settings.coherence_min_tokens, 50)
 
     def test_merge_manifest_serialization(self):
@@ -271,7 +274,7 @@ class MergeManagerTests(unittest.TestCase):
         # Create mock config
         self.config = MagicMock()
         self.config.evolution.merge_backend = "auto"
-        self.config.evolution.merge_after_loras = 3
+        self.config.evolution.auto_merge_after_loras = 3
         self.config.evolution.validation_timeout_seconds = 300
         self.config.paths.models_dir = self.temp_path / "models"
         self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
