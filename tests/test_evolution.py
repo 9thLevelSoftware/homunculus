@@ -2,9 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from homunculus.config import EvolutionSettings, HomunculusConfig, load_config
-from homunculus.models import LineageRecord, MergeManifest
+from homunculus.models import AdapterManifest, LineageRecord, MergeManifest
 
 
 class EvolutionInfrastructureTests(unittest.TestCase):
@@ -260,6 +261,633 @@ class EvolutionStorageTests(unittest.TestCase):
         gen2 = store.get_lineage_by_generation(2)
         self.assertEqual(len(gen2), 1)
         self.assertEqual(gen2[0].record_id, "merged-2")
+
+
+class MergeManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+
+        # Create mock config
+        self.config = MagicMock()
+        self.config.evolution.merge_backend = "auto"
+        self.config.evolution.merge_after_loras = 3
+        self.config.evolution.validation_timeout_seconds = 300
+        self.config.paths.models_dir = self.temp_path / "models"
+        self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create mock store
+        self.store = MagicMock()
+        self.store.load_registry.return_value = {"candidates": [], "history": []}
+        self.store.load_merges.return_value = []
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_detect_backend_returns_valid_value(self):
+        from homunculus.evolution.merge import detect_backend
+
+        backend = detect_backend()
+        self.assertIn(backend, ["mergekit", "mlx"])
+
+    def test_should_merge_false_when_no_promoted(self):
+        from homunculus.evolution.merge import MergeManager
+
+        mgr = MergeManager(self.config, self.store)
+        self.assertFalse(mgr.should_merge())
+
+    def test_should_merge_true_when_enough_promoted(self):
+        from homunculus.evolution.merge import MergeManager
+
+        self.store.load_registry.return_value = {
+            "candidates": [
+                {"candidate_id": "a", "status": "promoted", "created_at": "2024-01-01"},
+                {"candidate_id": "b", "status": "promoted", "created_at": "2024-01-02"},
+                {"candidate_id": "c", "status": "promoted", "created_at": "2024-01-03"},
+            ]
+        }
+        mgr = MergeManager(self.config, self.store)
+        self.assertTrue(mgr.should_merge())
+
+    def test_should_merge_respects_threshold(self):
+        from homunculus.evolution.merge import MergeManager
+
+        # Only 2 promoted, threshold is 3
+        self.store.load_registry.return_value = {
+            "candidates": [
+                {"candidate_id": "a", "status": "promoted", "created_at": "2024-01-01"},
+                {"candidate_id": "b", "status": "promoted", "created_at": "2024-01-02"},
+            ]
+        }
+        mgr = MergeManager(self.config, self.store)
+        self.assertFalse(mgr.should_merge())
+
+    def test_should_merge_excludes_non_promoted(self):
+        from homunculus.evolution.merge import MergeManager
+
+        self.store.load_registry.return_value = {
+            "candidates": [
+                {"candidate_id": "a", "status": "promoted", "created_at": "2024-01-01"},
+                {"candidate_id": "b", "status": "promoted", "created_at": "2024-01-02"},
+                {"candidate_id": "c", "status": "pending", "created_at": "2024-01-03"},
+                {"candidate_id": "d", "status": "rejected", "created_at": "2024-01-04"},
+            ]
+        }
+        mgr = MergeManager(self.config, self.store)
+        # Only 2 promoted, threshold is 3
+        self.assertFalse(mgr.should_merge())
+
+    def test_get_merge_candidates_excludes_pre_merge(self):
+        from homunculus.evolution.merge import MergeManager
+
+        self.store.load_registry.return_value = {
+            "candidates": [
+                {
+                    "candidate_id": "old",
+                    "status": "promoted",
+                    "created_at": "2024-01-01T00:00:00",
+                    "model_id": "m",
+                    "base_model": "b",
+                    "adapter_path": "/p",
+                    "dataset_snapshot": "s",
+                    "snapshot_path": None,
+                    "trainer": "t",
+                    "metrics": {},
+                },
+                {
+                    "candidate_id": "new",
+                    "status": "promoted",
+                    "created_at": "2024-01-10T00:00:00",
+                    "model_id": "m",
+                    "base_model": "b",
+                    "adapter_path": "/p",
+                    "dataset_snapshot": "s",
+                    "snapshot_path": None,
+                    "trainer": "t",
+                    "metrics": {},
+                },
+            ]
+        }
+        # Simulate a merge happened on 2024-01-05
+        self.store.load_merges.return_value = [
+            MergeManifest(
+                merge_id="m1",
+                source_loras=["old"],
+                target_base="model",
+                merge_method="linear",
+                created_at="2024-01-05T00:00:00",
+            )
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        candidates = mgr.get_merge_candidates()
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].candidate_id, "new")
+
+    def test_get_merge_candidates_returns_all_when_no_merges(self):
+        from homunculus.evolution.merge import MergeManager
+
+        self.store.load_registry.return_value = {
+            "candidates": [
+                {
+                    "candidate_id": "a",
+                    "status": "promoted",
+                    "created_at": "2024-01-01T00:00:00",
+                    "model_id": "m",
+                    "base_model": "b",
+                    "adapter_path": "/p",
+                    "dataset_snapshot": "s",
+                    "snapshot_path": None,
+                    "trainer": "t",
+                    "metrics": {},
+                },
+                {
+                    "candidate_id": "b",
+                    "status": "promoted",
+                    "created_at": "2024-01-02T00:00:00",
+                    "model_id": "m",
+                    "base_model": "b",
+                    "adapter_path": "/p",
+                    "dataset_snapshot": "s",
+                    "snapshot_path": None,
+                    "trainer": "t",
+                    "metrics": {},
+                },
+            ]
+        }
+        # No merges
+        self.store.load_merges.return_value = []
+
+        mgr = MergeManager(self.config, self.store)
+        candidates = mgr.get_merge_candidates()
+
+        self.assertEqual(len(candidates), 2)
+
+    def test_merge_creates_manifest(self):
+        from homunculus.evolution.merge import MergeManager, MergeResult
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path=str(self.temp_path / "lora1"),
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            )
+        ]
+
+        # Mock the actual merge to avoid needing real backends
+        mgr = MergeManager(self.config, self.store)
+        mgr._merge_with_mergekit = MagicMock(
+            return_value=MergeResult(success=True, output_path="/out")
+        )
+        mgr._merge_with_mlx = MagicMock(
+            return_value=MergeResult(success=True, output_path="/out")
+        )
+
+        result = mgr.merge(loras)
+
+        # Verify manifest was created
+        self.store.append_merge.assert_called_once()
+        manifest = self.store.append_merge.call_args[0][0]
+        self.assertEqual(manifest.source_loras, ["lora1"])
+        self.assertEqual(manifest.merge_method, "linear")
+
+    def test_merge_with_empty_loras_fails(self):
+        from homunculus.evolution.merge import MergeManager
+
+        mgr = MergeManager(self.config, self.store)
+        result = mgr.merge([])
+
+        self.assertFalse(result.success)
+        self.assertIn("No LoRAs", result.error_message)
+
+    def test_merge_updates_manifest_on_success(self):
+        from homunculus.evolution.merge import MergeManager, MergeResult
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path=str(self.temp_path / "lora1"),
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            )
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        mgr._merge_with_mergekit = MagicMock(
+            return_value=MergeResult(success=True, output_path="/out")
+        )
+        mgr._merge_with_mlx = MagicMock(
+            return_value=MergeResult(success=True, output_path="/out")
+        )
+
+        result = mgr.merge(loras)
+
+        self.assertTrue(result.success)
+        self.store.update_merge.assert_called_once()
+        updated_manifest = self.store.update_merge.call_args[0][0]
+        self.assertEqual(updated_manifest.status, "complete")
+        self.assertIsNotNone(updated_manifest.completed_at)
+
+    def test_merge_updates_manifest_on_failure(self):
+        from homunculus.evolution.merge import MergeManager, MergeResult
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path=str(self.temp_path / "lora1"),
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            )
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        mgr._merge_with_mergekit = MagicMock(
+            return_value=MergeResult(success=False, error_message="Something went wrong")
+        )
+        mgr._merge_with_mlx = MagicMock(
+            return_value=MergeResult(success=False, error_message="Something went wrong")
+        )
+
+        result = mgr.merge(loras)
+
+        self.assertFalse(result.success)
+        self.store.update_merge.assert_called_once()
+        updated_manifest = self.store.update_merge.call_args[0][0]
+        self.assertEqual(updated_manifest.status, "failed")
+        self.assertEqual(updated_manifest.error_message, "Something went wrong")
+
+    def test_generate_mergekit_config_linear(self):
+        from homunculus.evolution.merge import MergeManager
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path="/path/lora1",
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            ),
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path="/path/lora2",
+                dataset_snapshot="snap2",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-02",
+                candidate_id="lora2",
+            ),
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=["lora1", "lora2"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="linear",
+        )
+
+        config = mgr._generate_mergekit_config(manifest, loras)
+
+        self.assertEqual(config["merge_method"], "linear")
+        self.assertEqual(config["dtype"], "bfloat16")
+        self.assertEqual(len(config["models"]), 3)  # base + 2 loras
+
+    def test_generate_mergekit_config_ties(self):
+        from homunculus.evolution.merge import MergeManager
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path="/path/lora1",
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            ),
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=["lora1"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="ties",
+        )
+
+        config = mgr._generate_mergekit_config(manifest, loras)
+
+        self.assertEqual(config["merge_method"], "ties")
+        self.assertEqual(config["base_model"], "qwen2.5-coder-1.5b")
+        self.assertTrue(config["parameters"]["normalize"])
+
+    def test_generate_mergekit_config_dare_ties(self):
+        from homunculus.evolution.merge import MergeManager
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path="/path/lora1",
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            ),
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=["lora1"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="dare_ties",
+        )
+
+        config = mgr._generate_mergekit_config(manifest, loras)
+
+        self.assertEqual(config["merge_method"], "dare_ties")
+        self.assertEqual(config["base_model"], "qwen2.5-coder-1.5b")
+
+    def test_generate_mergekit_config_unknown_method_raises(self):
+        from homunculus.evolution.merge import MergeManager
+
+        loras = [
+            AdapterManifest(
+                model_id="model",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path="/path/lora1",
+                dataset_snapshot="snap1",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="promoted",
+                created_at="2024-01-01",
+                candidate_id="lora1",
+            ),
+        ]
+
+        mgr = MergeManager(self.config, self.store)
+        manifest = MergeManifest(
+            merge_id="test",
+            source_loras=["lora1"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="unknown_method",
+        )
+
+        with self.assertRaises(ValueError) as context:
+            mgr._generate_mergekit_config(manifest, loras)
+
+        self.assertIn("Unknown merge method", str(context.exception))
+
+    def test_select_backend_uses_config(self):
+        from homunculus.evolution.merge import MergeManager
+
+        # Test explicit mergekit
+        self.config.evolution.merge_backend = "mergekit"
+        mgr = MergeManager(self.config, self.store)
+        self.assertEqual(mgr.backend, "mergekit")
+
+        # Test explicit mlx
+        self.config.evolution.merge_backend = "mlx"
+        mgr = MergeManager(self.config, self.store)
+        self.assertEqual(mgr.backend, "mlx")
+
+
+class LineageTrackerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+
+        # Create mock config and store
+        self.config = MagicMock()
+        self.store = MagicMock()
+
+        # Track appended records
+        self.lineage_records: list = []
+
+        def mock_append(record):
+            self.lineage_records.append(record)
+
+        self.store.append_lineage = mock_append
+        self.store.load_lineage = lambda: list(self.lineage_records)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_register_base_model(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        tracker = LineageTracker(self.config, self.store)
+        record = tracker.register_base_model("qwen2.5-coder-1.5b")
+
+        self.assertEqual(record.record_type, "base")
+        self.assertEqual(record.generation, 0)
+        self.assertEqual(record.parent_ids, [])
+
+    def test_register_lora_links_to_base(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        tracker = LineageTracker(self.config, self.store)
+
+        # Register base first
+        tracker.register_base_model("qwen2.5-coder-1.5b")
+
+        # Register LoRA
+        candidate = AdapterManifest(
+            model_id="qwen2.5-coder-1.5b",
+            base_model="qwen2.5-coder-1.5b",
+            adapter_path="/path/to/lora",
+            dataset_snapshot="snap1",
+            snapshot_path=None,
+            trainer="mlx-lm",
+            metrics={},
+            status="trained",
+            created_at="2024-01-01",
+            candidate_id="lora-001",
+        )
+
+        record = tracker.register_lora(candidate, episode_ids=["ep1", "ep2"])
+
+        self.assertEqual(record.record_type, "lora")
+        self.assertEqual(record.generation, 0)  # Same as base
+        self.assertIn("base-qwen2.5-coder-1.5b", record.parent_ids)
+        self.assertEqual(record.episode_ids, ["ep1", "ep2"])
+
+    def test_register_merge_increments_generation(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        tracker = LineageTracker(self.config, self.store)
+
+        # Setup: base -> lora1, lora2
+        tracker.register_base_model("qwen2.5-coder-1.5b")
+
+        for i, cid in enumerate(["lora-001", "lora-002"]):
+            candidate = AdapterManifest(
+                model_id="qwen2.5-coder-1.5b",
+                base_model="qwen2.5-coder-1.5b",
+                adapter_path=f"/path/to/{cid}",
+                dataset_snapshot=f"snap{i}",
+                snapshot_path=None,
+                trainer="mlx-lm",
+                metrics={},
+                status="trained",
+                created_at="2024-01-01",
+                candidate_id=cid,
+            )
+            tracker.register_lora(candidate, episode_ids=[f"ep{i}"])
+
+        # Merge
+        merge = MergeManifest(
+            merge_id="merge-001",
+            source_loras=["lora-001", "lora-002"],
+            target_base="qwen2.5-coder-1.5b",
+            merge_method="linear",
+            output_path="/path/to/merged",
+        )
+
+        record = tracker.register_merge(merge, "qwen2.5-coder-1.5b-gen1")
+
+        self.assertEqual(record.record_type, "merged")
+        self.assertEqual(record.generation, 1)  # Incremented
+        self.assertIn("ep0", record.episode_ids)
+        self.assertIn("ep1", record.episode_ids)
+
+    def test_get_ancestors(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        # Pre-populate lineage
+        self.lineage_records = [
+            LineageRecord(record_id="base", record_type="base", model_id="m", generation=0),
+            LineageRecord(record_id="lora1", record_type="lora", model_id="m", parent_ids=["base"], generation=0),
+            LineageRecord(record_id="merge1", record_type="merged", model_id="m", parent_ids=["base", "lora1"], generation=1),
+        ]
+
+        tracker = LineageTracker(self.config, self.store)
+        ancestors = tracker.get_ancestors("merge1")
+
+        ancestor_ids = [a.record_id for a in ancestors]
+        self.assertIn("base", ancestor_ids)
+        self.assertIn("lora1", ancestor_ids)
+
+    def test_export_graph(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        self.lineage_records = [
+            LineageRecord(record_id="base", record_type="base", model_id="m", generation=0),
+            LineageRecord(record_id="lora1", record_type="lora", model_id="m", parent_ids=["base"], generation=0),
+        ]
+
+        tracker = LineageTracker(self.config, self.store)
+        graph = tracker.export_graph()
+
+        self.assertEqual(len(graph["nodes"]), 2)
+        self.assertEqual(len(graph["edges"]), 1)
+        self.assertEqual(graph["generations"], 1)  # Only gen 0
+
+    def test_get_descendants(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        # Pre-populate lineage: base -> lora1 -> merge1
+        self.lineage_records = [
+            LineageRecord(record_id="base", record_type="base", model_id="m", generation=0),
+            LineageRecord(record_id="lora1", record_type="lora", model_id="m", parent_ids=["base"], generation=0),
+            LineageRecord(record_id="merge1", record_type="merged", model_id="m", parent_ids=["lora1"], generation=1),
+        ]
+
+        tracker = LineageTracker(self.config, self.store)
+        descendants = tracker.get_descendants("base")
+
+        descendant_ids = [d.record_id for d in descendants]
+        self.assertIn("lora1", descendant_ids)
+        self.assertIn("merge1", descendant_ids)
+
+    def test_get_episodes_for_model(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        # Pre-populate: base -> lora1, lora2 -> merge
+        self.lineage_records = [
+            LineageRecord(record_id="base", record_type="base", model_id="m", generation=0),
+            LineageRecord(record_id="lora1", record_type="lora", model_id="m", parent_ids=["base"], episode_ids=["ep1", "ep2"], generation=0),
+            LineageRecord(record_id="lora2", record_type="lora", model_id="m", parent_ids=["base"], episode_ids=["ep3"], generation=0),
+            LineageRecord(record_id="merge1", record_type="merged", model_id="m", parent_ids=["lora1", "lora2"], episode_ids=["ep1", "ep2", "ep3"], generation=1),
+        ]
+
+        tracker = LineageTracker(self.config, self.store)
+        episodes = tracker.get_episodes_for_model("merge1")
+
+        self.assertIn("ep1", episodes)
+        self.assertIn("ep2", episodes)
+        self.assertIn("ep3", episodes)
+
+    def test_ensure_base_registered_idempotent(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        tracker = LineageTracker(self.config, self.store)
+
+        # Register twice
+        record1 = tracker.ensure_base_registered("qwen2.5-coder-1.5b")
+        record2 = tracker.ensure_base_registered("qwen2.5-coder-1.5b")
+
+        # Should only have one record
+        self.assertEqual(len(self.lineage_records), 1)
+        self.assertEqual(record1.record_id, record2.record_id)
+
+    def test_get_current_generation_empty(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        tracker = LineageTracker(self.config, self.store)
+        gen = tracker.get_current_generation()
+
+        self.assertEqual(gen, 0)
+
+    def test_get_current_generation_with_records(self):
+        from homunculus.evolution.lineage import LineageTracker
+
+        self.lineage_records = [
+            LineageRecord(record_id="base", record_type="base", model_id="m", generation=0),
+            LineageRecord(record_id="merge1", record_type="merged", model_id="m", generation=1),
+            LineageRecord(record_id="merge2", record_type="merged", model_id="m", generation=2),
+        ]
+
+        tracker = LineageTracker(self.config, self.store)
+        gen = tracker.get_current_generation()
+
+        self.assertEqual(gen, 2)
 
 
 if __name__ == "__main__":
