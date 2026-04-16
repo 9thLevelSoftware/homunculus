@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 import unittest
 
@@ -150,6 +151,100 @@ Add a comment to file.py
             # Release and verify
             daemon.release_lock()
             self.assertFalse(daemon.lock_path.exists())
+
+    def test_daemon_shutdown_event_stops_loop(self) -> None:
+        """Test that setting shutdown event stops continuous loop."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            # Use tiny interval for test speed
+            config.daemon.cycle_interval_minutes = 0.001  # ~60ms
+
+            daemon = Daemon(config)
+
+            # Set shutdown event before starting
+            daemon.request_shutdown()
+
+            # Run continuous should exit immediately
+            completed_event = threading.Event()
+
+            def run_daemon() -> None:
+                daemon.run_continuous()
+                completed_event.set()
+
+            thread = threading.Thread(target=run_daemon)
+            thread.start()
+
+            # Wait for completion with timeout
+            completed = completed_event.wait(timeout=5)
+            self.assertTrue(completed, "Daemon should have stopped due to shutdown event")
+            thread.join(timeout=1)
+
+    def test_daemon_saves_state_on_shutdown(self) -> None:
+        """Test that state is saved when daemon shuts down."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            config.daemon.cycle_interval_minutes = 0.001  # ~60ms
+
+            daemon = Daemon(config)
+
+            # Schedule shutdown after a brief delay
+            def shutdown_soon() -> None:
+                import time
+                time.sleep(0.1)  # Let one cycle run
+                daemon.request_shutdown()
+
+            shutdown_thread = threading.Thread(target=shutdown_soon)
+            shutdown_thread.start()
+
+            # Run continuous (will exit after shutdown)
+            daemon.run_continuous()
+            shutdown_thread.join()
+
+            # State file should exist
+            self.assertTrue(daemon.state_path.exists())
+
+            # State should have at least one cycle recorded
+            state = daemon.load_state()
+            self.assertGreaterEqual(state.cycles_completed, 1)
+
+    def test_daemon_continuous_updates_state(self) -> None:
+        """Test that continuous mode updates state after each cycle."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            config.daemon.cycle_interval_minutes = 0.001  # ~60ms
+
+            daemon = Daemon(config)
+
+            # Create a suggestion so we have non-idle cycles
+            suggestions_dir = config.paths.root / "suggestions"
+            suggestions_dir.mkdir(exist_ok=True)
+            (suggestions_dir / "task.md").write_text("# Test\n\n## What\nTest task", encoding="utf-8")
+
+            # Schedule shutdown after 2 cycles worth of time
+            def shutdown_after_cycles() -> None:
+                import time
+                time.sleep(0.2)
+                daemon.request_shutdown()
+
+            shutdown_thread = threading.Thread(target=shutdown_after_cycles)
+            shutdown_thread.start()
+
+            daemon.run_continuous()
+            shutdown_thread.join()
+
+            # Load final state
+            state = daemon.load_state()
+
+            # Should have completed at least 1 cycle
+            self.assertGreaterEqual(state.cycles_completed, 1)
+            # Should have a last_cycle_at timestamp
+            self.assertIsNotNone(state.last_cycle_at)
 
 
 if __name__ == "__main__":

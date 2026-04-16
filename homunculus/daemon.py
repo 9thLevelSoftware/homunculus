@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -99,6 +99,29 @@ class Daemon:
     def shutdown_requested(self) -> bool:
         return self._shutdown_event.is_set()
 
+    def request_shutdown(self) -> None:
+        """Request graceful shutdown."""
+        self._shutdown_event.set()
+
+    def _setup_signal_handlers(self) -> None:
+        """Set up graceful shutdown on SIGINT/SIGTERM using threading.Event.
+
+        Only works in main thread (Python limitation). Silently skips in other threads.
+        """
+        # Signal handlers can only be set in the main thread
+        if threading.current_thread() is not threading.main_thread():
+            return
+
+        def handle_shutdown(signum: int, frame: object) -> None:
+            signal_name = signal.Signals(signum).name
+            print(f"\nReceived {signal_name}. Finishing current episode and shutting down...")
+            self._shutdown_event.set()
+
+        signal.signal(signal.SIGINT, handle_shutdown)
+        # SIGTERM only on Unix
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, handle_shutdown)
+
     def get_pending_tasks(self) -> list[GeneratedTask]:
         """Get all pending tasks from suggestion directory."""
         return self.suggestion_reader.read_pending()
@@ -153,6 +176,7 @@ class Daemon:
 
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""
+        self._setup_signal_handlers()
         state = self.load_state()
         interval_seconds = self.config.daemon.cycle_interval_minutes * 60
 
@@ -179,8 +203,8 @@ class Daemon:
             if self.shutdown_requested:
                 break
 
-            # Sleep until next cycle (Plan 03 will make this interruptible)
-            time.sleep(interval_seconds)
+            # Use Event.wait() for responsive shutdown — wakes immediately on signal
+            self._shutdown_event.wait(timeout=interval_seconds)
 
         # Final state save on shutdown
         self.save_state(state)
