@@ -85,6 +85,13 @@ class TaskExecutionResult:
 
 
 @dataclass
+class CommitResult:
+    committed: bool
+    commit_sha: str | None = None
+    message: str | None = None
+
+
+@dataclass
 class EpisodeRecord:
     episode_id: str
     task_id: str
