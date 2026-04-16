@@ -227,4 +227,26 @@ After gate clears: re-run `/legion:build` (or invoke the QA agent directly) to s
 
 ## Next Action
 
-Operator decision required: pick option 1, 2, or 3 above to clear the throughput gate. Once cleared, re-run `/legion:build --phase 5` to resume Wave 3.
+Portable soak kickoff built (commit `311c1be`). Target PC workflow documented in `scripts/phase5/README.md`:
+
+```
+git clone <repo> && cd homunculus
+python -m venv .venv && .\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+python -m unittest discover -q     # expect: Ran 308 tests ... OK
+
+.\scripts\phase5\setup.ps1         # ollama install/serve + pull 14B + env
+.\scripts\phase5\bootstrap.ps1     # 10 seed episodes -> populates traces/
+.\scripts\phase5\precheck.ps1      # sanity-check throughput gate
+.\scripts\phase5\start-soak.ps1    # branch + preflight + daemon detached + daily task
+
+# wait >=7 days
+
+.\scripts\phase5\stop-soak.ps1
+python -m homunculus.cli autonomy-accept --config homunculus.toml \
+  --soak-log .planning\phases\05-full-autonomy\soak-log \
+  --soak-branch phase-5/soak-YYYYMMDD \
+  --output .planning\phases\05-full-autonomy\05-ACCEPTANCE.md
+```
+
+Session 2 (invokes 05-03-2 acceptance predicate audit + 05-03-3 ROADMAP/STATE sign-off) runs AFTER soak completes. Resume via new `/legion:build --phase 5` session.
