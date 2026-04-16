@@ -1275,5 +1275,129 @@ class CoherenceFailClosedTests(unittest.TestCase):
         self.assertIn("backend_unavailable", result.message.lower())
 
 
+class CoherenceTokenSlicingTests(unittest.TestCase):
+    """Coherence stage must NOT count prompt tokens as output tokens.
+
+    Regression tests for three orthogonal hardening fixes in
+    _generate_transformers and _is_repetitive:
+      1. Prompt-token leak: returning the prompt unchanged (zero new tokens)
+         must NOT pass min_tokens=50 just because the prompt is ~10 words.
+      2. _is_repetitive precision: short outputs (<10 words) of pure
+         repetition must be flagged, not silently passed.
+    """
+
+    def setUp(self):
+        # Mirror CoherenceFailClosedTests: a MagicMock config is sufficient
+        # because _validate_coherence only reads the two coherence_* keys.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.output = Path(self.tmp.name) / "merged"
+        self.output.mkdir()
+        (self.output / "config.json").write_text("{}", encoding="utf-8")
+        (self.output / "model.safetensors").write_text("fake", encoding="utf-8")
+
+        self.config = MagicMock()
+        self.config.canary_commands = None
+        self.config.evolution.validation_timeout_seconds = 30
+        self.config.evolution.coherence_prompt = (
+            "Write a Python function that returns the nth Fibonacci number."
+        )
+        self.config.evolution.coherence_min_tokens = 50
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_validator(self):
+        from homunculus.evolution.validation import MergeValidator
+        return MergeValidator(self.config)
+
+    def test_token_count_excludes_prompt(self):
+        # Post-fix contract: when the model generates zero new tokens,
+        # _generate_transformers returns "" (empty generated suffix) and
+        # the empty-output check fires. We simulate the post-fix correct
+        # behavior by returning "" from the patched method, and assert
+        # that _validate_coherence catches it. This guards the integration
+        # path: the empty-output rejection plus the source-level slice
+        # check (test_generate_transformers_strips_prompt) together prove
+        # zero-new-token generation cannot pass coherence.
+        self.assertTrue(self.config.evolution.coherence_prompt)
+
+        validator = self._make_validator()
+        manifest = MergeManifest(
+            merge_id="m",
+            source_loras=[],
+            target_base="b",
+            merge_method="linear",
+            output_path=str(self.output),
+        )
+
+        with patch("platform.system", return_value="Linux"), \
+             patch.object(
+                 validator,
+                 "_generate_transformers",
+                 return_value="",  # zero new tokens generated
+             ):
+            result = validator._validate_coherence(manifest)
+
+        self.assertFalse(
+            result.passed,
+            "Zero-new-token generation (empty output after prompt slice) "
+            "MUST NOT pass coherence",
+        )
+        self.assertIn("empty", result.message.lower())
+
+    def test_generate_transformers_strips_prompt(self):
+        """The transformers generator MUST slice off prompt tokens.
+
+        We assert the source code pattern directly because importing
+        torch/transformers in CI is not guaranteed. The contract is:
+        the method must NOT decode the full output_ids tensor — it must
+        slice [inputs.input_ids.shape[1]:] before decoding.
+        """
+        from pathlib import Path
+        src = Path("homunculus/evolution/validation.py").read_text(encoding="utf-8")
+        # Find the _generate_transformers method body
+        idx = src.find("def _generate_transformers")
+        self.assertGreater(idx, -1, "_generate_transformers method must exist")
+        # Slice a generous window around the method
+        method_src = src[idx:idx + 2000]
+        # Pre-fix smell: decoding outputs[0] directly without slicing
+        self.assertNotIn(
+            "tokenizer.decode(outputs[0]",
+            method_src,
+            "BUG: decoding outputs[0] includes the prompt; must slice "
+            "[inputs.input_ids.shape[1]:] first",
+        )
+        # Post-fix marker: must slice off prompt tokens before decode
+        self.assertIn(
+            "inputs.input_ids.shape[1]",
+            method_src,
+            "FIX: must slice generated tokens with [inputs.input_ids.shape[1]:]",
+        )
+        # Determinism: greedy decoding (no sampling)
+        self.assertIn(
+            "do_sample=False",
+            method_src,
+            "FIX: coherence generation must be deterministic (do_sample=False)",
+        )
+        # Memory hygiene: del + cuda cache clear in finally
+        self.assertIn("del model", method_src,
+                      "FIX: must del model to release VRAM")
+        self.assertIn(
+            "torch.cuda.empty_cache",
+            method_src,
+            "FIX: must call torch.cuda.empty_cache() to release VRAM",
+        )
+
+    def test_short_repetitive_output_detected(self):
+        """Regression for _is_repetitive: 9 identical words should be flagged."""
+        validator = self._make_validator()
+        # 9 repeated words — under the old <10 word early-return, this slipped
+        # through; under the new 4-gram dominance check it must be caught.
+        self.assertTrue(
+            validator._is_repetitive("the the the the the the the the the"),
+            "9-word pure repetition must be flagged as degenerate",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

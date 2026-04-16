@@ -311,7 +311,17 @@ class MergeValidator:
         return output
 
     def _generate_transformers(self, model_path: str, prompt: str) -> str:
-        """Generate using transformers (fallback)."""
+        """Generate using transformers (fallback). Greedy, prompt-stripped, GC'd.
+
+        Three hardening properties:
+          - Greedy decoding (do_sample=False) so coherence is deterministic;
+            the same merge cannot pass once and fail next.
+          - Slices off prompt tokens before decode; otherwise the token-count
+            check would count prompt tokens as "output" and a model that
+            generated zero new tokens could still pass min_tokens.
+          - try/finally with del + cuda.empty_cache() to release VRAM
+            between merges; otherwise repeated validation OOMs the GPU.
+        """
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -321,25 +331,49 @@ class MergeValidator:
             torch_dtype=torch.bfloat16,
             device_map="auto",
         )
+        try:
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=200,
+                    do_sample=False,  # greedy = deterministic
+                )
+            # Slice off the prompt tokens so we count only generated content
+            new_tokens = output_ids[0][inputs.input_ids.shape[1]:]
+            return tokenizer.decode(new_tokens, skip_special_tokens=True)
+        finally:
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.7)
-        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    def _is_repetitive(self, text: str) -> bool:
+        """Detect degenerate repetitive output via 4-gram dominance.
 
-    def _is_repetitive(self, text: str, threshold: float = 0.5) -> bool:
-        """Check if text is repetitively degenerate."""
-        words = text.lower().split()
-        if len(words) < 10:
+        Flags text as repetitive when a single 4-gram appears at least
+        twice AND accounts for more than 15% of all 4-grams. The
+        "appears at least twice" guard prevents false positives on short
+        but diverse outputs (where the natural floor 1/len(ngrams) can
+        already exceed 15%).
+
+        For very short outputs (<4 words, where 4-grams are not
+        computable) we treat near-total duplication as suspicious.
+
+        The previous bigram threshold of 0.5 was too loose for code
+        outputs, and the <10-word early-return let short pure-repetition
+        outputs ("the the the the the the the the the") slip through.
+        """
+        words = text.split()
+        if len(words) < 4:
+            # Too few words to compute 4-grams; treat heavy duplication
+            # as suspicious (more than half the words are duplicates)
+            unique = set(words)
+            return len(unique) < max(1, len(words) // 2)
+        ngrams = [" ".join(words[i:i + 4]) for i in range(len(words) - 3)]
+        if not ngrams:
             return False
-
-        # Check for repeated n-grams
-        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
-        bigram_counts = Counter(bigrams)
-
-        if not bigram_counts:
-            return False
-
-        most_common_count = bigram_counts.most_common(1)[0][1]
-        repetition_ratio = most_common_count / len(bigrams)
-
-        return repetition_ratio > threshold
+        most_common_count = Counter(ngrams).most_common(1)[0][1]
+        # Require BOTH actual repetition (>=2 occurrences) AND dominance
+        # (>15% of all ngrams). The first guard prevents false positives
+        # on short diverse text where 1/len(ngrams) can already exceed 15%.
+        return most_common_count >= 2 and (most_common_count / len(ngrams)) > 0.15
