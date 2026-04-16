@@ -2,10 +2,24 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from homunculus.config import EvolutionSettings, HomunculusConfig, load_config
 from homunculus.models import AdapterManifest, LineageRecord, MergeManifest
+
+
+def _has_inference_backend() -> bool:
+    """Check if any inference backend (MLX or transformers) is importable."""
+    try:
+        import mlx_lm  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        import transformers  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 class EvolutionInfrastructureTests(unittest.TestCase):
@@ -1123,6 +1137,23 @@ class IntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(result.stages), 1)
         self.assertEqual(result.stages[0].stage, "load")
 
+        # With the coherence fix, behavior depends on whether a backend is installed.
+        # On bare CI / Windows-no-backend: coherence fails closed -> pipeline fails.
+        # On a real ML host with MLX or transformers: coherence still fails because the
+        # fake "model.safetensors = 'fake'" cannot be loaded as a real model.
+        # Either way, never a silent pass on garbage.
+        if _has_inference_backend():
+            # Backend present -> load attempt against fake weights raises an error
+            # -> result.passed should be False with a real failure reason.
+            self.assertFalse(result.passed)
+        else:
+            self.assertFalse(result.passed)
+            self.assertTrue(
+                any("backend_unavailable" in stage.message.lower()
+                    for stage in result.stages),
+                f"expected backend_unavailable in stages, got: {[s.message for s in result.stages]}",
+            )
+
         temp_dir.cleanup()
 
     def test_validation_result_to_dict(self):
@@ -1174,6 +1205,74 @@ class TaskGeneratorMergeTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertIn("Unknown", task.prompt)
         self.assertIn("5", task.prompt)
+
+
+class CoherenceFailClosedTests(unittest.TestCase):
+    """Coherence stage must fail closed when no inference backend is available.
+
+    Regression test for the silent-failure bug where _validate_coherence
+    returned passed=True on backend-less machines (Windows w/o transformers,
+    Linux w/o MLX or transformers).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.output = Path(self.tmp.name) / "merged"
+        self.output.mkdir()
+        (self.output / "config.json").write_text("{}", encoding="utf-8")
+        (self.output / "model.safetensors").write_text("fake", encoding="utf-8")
+
+        # Mirror the pattern used by ValidationTests: a MagicMock config is
+        # sufficient because _validate_coherence only reads coherence_prompt
+        # and coherence_min_tokens.
+        self.config = MagicMock()
+        self.config.canary_commands = None
+        self.config.evolution.validation_timeout_seconds = 30
+        self.config.evolution.coherence_prompt = "Test prompt"
+        self.config.evolution.coherence_min_tokens = 10
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_validator(self):
+        from homunculus.evolution.validation import MergeValidator
+        return MergeValidator(self.config)
+
+    def test_coherence_fails_closed_when_no_backend(self):
+        manifest = MergeManifest(
+            merge_id="m1",
+            source_loras=[],
+            target_base="b",
+            merge_method="linear",
+            output_path=str(self.output),
+        )
+        validator = self._make_validator()
+
+        # Force both backends to be unavailable by intercepting imports.
+        # __import__ is always a function on the builtins module; reach it
+        # via the builtins module to avoid the dict-vs-module __builtins__
+        # ambiguity that varies by execution context.
+        import builtins
+        original_import = builtins.__import__
+
+        def blocking_import(name, *args, **kwargs):
+            if (
+                name in ("mlx_lm", "transformers")
+                or name.startswith("mlx_lm.")
+                or name.startswith("transformers.")
+            ):
+                raise ImportError(f"forced absence of {name}")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=blocking_import):
+            result = validator._validate_coherence(manifest)
+
+        self.assertFalse(
+            result.passed,
+            "coherence MUST fail closed when no backend is available",
+        )
+        self.assertEqual(result.stage, "coherence")
+        self.assertIn("backend_unavailable", result.message.lower())
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from typing import Any
 
 from ..config import HomunculusConfig
 from ..models import MergeManifest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -242,19 +245,21 @@ class MergeValidator:
             try:
                 output = self._generate_mlx(manifest.output_path, prompt)
             except ImportError:
-                pass  # MLX not available, fall through to transformers
-            except Exception:
-                pass  # MLX failed, fall through to transformers
+                logger.info("MLX not installed; falling through to transformers")
+            except Exception as e:
+                logger.warning(
+                    "MLX generation failed: %s; falling through to transformers", e
+                )
 
         if output is None:
             try:
                 output = self._generate_transformers(manifest.output_path, prompt)
             except ImportError:
-                # Neither backend available - skip coherence check gracefully
+                # Fail closed: no inference backend means we cannot verify the merge
                 return ValidationResult(
                     stage="coherence",
-                    passed=True,
-                    message="No inference backend available (skipped)",
+                    passed=False,
+                    message="backend_unavailable: install mlx_lm or transformers to enable evolution",
                 )
             except Exception as e:
                 return ValidationResult(
