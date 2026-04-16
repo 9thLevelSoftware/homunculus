@@ -23,6 +23,24 @@ def _has_inference_backend() -> bool:
         return False
 
 
+def _has_yaml() -> bool:
+    """Check if pyyaml is importable (required for mergekit YAML path)."""
+    try:
+        import yaml  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _has_numpy() -> bool:
+    """Check if numpy is importable (used by MLX merge math tests)."""
+    try:
+        import numpy  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class EvolutionInfrastructureTests(unittest.TestCase):
     def test_evolution_settings_defaults(self):
         settings = EvolutionSettings()
@@ -442,6 +460,7 @@ class MergeManagerTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 2)
 
+    @unittest.skipUnless(_has_yaml(), "pyyaml not installed (mergekit path)")
     def test_merge_creates_manifest(self):
         from homunculus.evolution.merge import MergeManager
 
@@ -489,6 +508,7 @@ class MergeManagerTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("No LoRAs", result.error_message)
 
+    @unittest.skipUnless(_has_yaml(), "pyyaml not installed (mergekit path)")
     def test_merge_updates_manifest_on_success(self):
         from homunculus.evolution.merge import MergeManager
 
@@ -523,6 +543,7 @@ class MergeManagerTests(unittest.TestCase):
         self.assertEqual(updated_manifest.status, "complete")
         self.assertIsNotNone(updated_manifest.completed_at)
 
+    @unittest.skipUnless(_has_yaml(), "pyyaml not installed (mergekit path)")
     def test_merge_updates_manifest_on_failure(self):
         from homunculus.evolution.merge import MergeManager
 
@@ -1654,6 +1675,7 @@ class MergeBaseConsistencyTests(unittest.TestCase):
                 self.fail(f"Homogeneous base must NOT raise ValueError: {e}")
 
 
+@unittest.skipUnless(_has_numpy(), "numpy not installed (skipping MLX merge math)")
 class MLXMergeMathTests(unittest.TestCase):
     """Correctness of the MLX merge math helpers.
 
@@ -1774,6 +1796,7 @@ class MLXMergeMathTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_has_yaml(), "pyyaml not installed (skipping mergekit YAML correctness)")
 class MergekitYamlCorrectnessTests(unittest.TestCase):
     """mergekit-yaml cannot consume PEFT adapter directories directly.
 
