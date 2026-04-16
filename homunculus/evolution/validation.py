@@ -325,15 +325,18 @@ class MergeValidator:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
+        model = None  # sentinel so a tokenizer-load failure won't NameError in finally
         try:
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
             with torch.no_grad():
+                # batch=1 because we tokenize a single prompt string;
+                # output_ids[0] selects that single sequence
                 output_ids = model.generate(
                     **inputs,
                     max_new_tokens=200,
@@ -343,7 +346,8 @@ class MergeValidator:
             new_tokens = output_ids[0][inputs.input_ids.shape[1]:]
             return tokenizer.decode(new_tokens, skip_special_tokens=True)
         finally:
-            del model
+            if model is not None:
+                del model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 

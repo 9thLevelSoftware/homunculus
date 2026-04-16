@@ -1354,7 +1354,13 @@ class CoherenceTokenSlicingTests(unittest.TestCase):
         slice [inputs.input_ids.shape[1]:] before decoding.
         """
         from pathlib import Path
-        src = Path("homunculus/evolution/validation.py").read_text(encoding="utf-8")
+        src_path = (
+            Path(__file__).resolve().parent.parent
+            / "homunculus"
+            / "evolution"
+            / "validation.py"
+        )
+        src = src_path.read_text(encoding="utf-8")
         # Find the _generate_transformers method body
         idx = src.find("def _generate_transformers")
         self.assertGreater(idx, -1, "_generate_transformers method must exist")
