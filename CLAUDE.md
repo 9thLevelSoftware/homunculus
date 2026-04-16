@@ -70,8 +70,8 @@ python -m homunculus.cli train-sft --config homunculus.toml --simulate
 These are **intentional constraints**, not bugs:
 
 - Source workspace must be clean before any episode
-- `run-episode` never mutates the source repo (worktree isolation)
-- Accepted patches stay as artifacts until explicit `apply-episode`
+- `run-episode` never mutates the source repo during verification (worktree isolation)
+- Accepted patches are auto-committed to the source repo when `[daemon].auto_commit_on_accept = true` (default). Set to `false` to retain the manual `apply-episode` workflow — patch artifacts remain available either way.
 - Training only from immutable materialized snapshots
 - Candidate promotion requires `--human-approved` flag
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from ..config import HomunculusConfig
@@ -9,6 +10,8 @@ from ..models import EpisodeRecord, StudentResponse, TaskRequest, TeacherRespons
 from ..policy import GuardrailEngine
 from ..storage import ArtifactStore
 from ..task_runner.runner import TaskRunner, WorkspacePreflightError
+
+logger = logging.getLogger(__name__)
 
 
 class EpisodeOrchestrator:
@@ -51,6 +54,7 @@ class EpisodeOrchestrator:
         failure_stage: str | None = None
         error_type: str | None = None
         error_message: str | None = None
+        commit_sha: str | None = None
         curation = {"sft_added": 0, "dpo_added": 0}
 
         self.store.ensure_layout()
@@ -119,6 +123,18 @@ class EpisodeOrchestrator:
                     },
                 )
 
+                if (
+                    outcome == "accepted"
+                    and self.config.daemon.auto_commit_on_accept
+                ):
+                    commit_patch = execution.canonical_patch or teacher_response.candidate_patch
+                    commit_sha = self._auto_commit(
+                        workspace=workspace,
+                        episode_id=episode_id,
+                        task=task,
+                        patch=commit_patch,
+                    )
+
                 stage = "reflect"
                 self.memory_client.record_outcome(
                     episode_id,
@@ -157,6 +173,7 @@ class EpisodeOrchestrator:
                     failure_stage=None,
                     error_type=None,
                     error_message=None,
+                    commit_sha=commit_sha,
                 )
                 curation = self.dataset_builder.ingest_episode(episode_for_curation)
                 self.store.append_event(
@@ -227,6 +244,7 @@ class EpisodeOrchestrator:
             failure_stage=failure_stage,
             error_type=error_type,
             error_message=error_message,
+            commit_sha=commit_sha,
         )
         self.store.append_episode(episode)
         if outcome != "error":
@@ -260,6 +278,7 @@ class EpisodeOrchestrator:
         failure_stage: str | None,
         error_type: str | None,
         error_message: str | None,
+        commit_sha: str | None = None,
     ) -> EpisodeRecord:
         return EpisodeRecord(
             episode_id=episode_id,
@@ -285,7 +304,69 @@ class EpisodeOrchestrator:
             failure_stage=failure_stage,
             error_type=error_type,
             error_message=error_message,
+            commit_sha=commit_sha,
         )
+
+    def _auto_commit(
+        self,
+        workspace,
+        episode_id: str,
+        task: TaskRequest,
+        patch: str | None,
+    ) -> str | None:
+        """Apply the verified patch to the source workspace and commit.
+
+        Returns the commit SHA on success, None on failure or if there is
+        nothing to commit. Failures are logged but never raise — the patch
+        artifact remains available for manual `apply-episode` recovery.
+        """
+        if not patch:
+            return None
+        try:
+            self.task_runner.apply_patch(workspace.path, patch)
+        except Exception as exc:  # apply failed — leave source clean
+            logger.error(
+                "Auto-commit apply_patch failed for episode %s: %s",
+                episode_id,
+                exc,
+            )
+            return None
+        try:
+            commit_message = self._build_commit_message(task)
+            commit_result = self.task_runner.commit_to_source(
+                workspace=workspace,
+                task_id=task.task_id,
+                episode_id=episode_id,
+                message=commit_message,
+            )
+        except Exception as exc:
+            logger.error(
+                "Auto-commit commit_to_source failed for episode %s: %s",
+                episode_id,
+                exc,
+            )
+            return None
+        self.store.append_event(
+            "auto_commit",
+            {
+                "episode_id": episode_id,
+                "task_id": task.task_id,
+                "committed": commit_result.committed,
+                "commit_sha": commit_result.commit_sha,
+                "timestamp": utc_now(),
+            },
+        )
+        return commit_result.commit_sha
+
+    def _build_commit_message(self, task: TaskRequest) -> str:
+        """Build a one-line subject from the task prompt for the auto-commit."""
+        prompt = (task.prompt or "").strip()
+        if not prompt:
+            return f"homunculus: episode for task {task.task_id}"
+        subject = prompt.splitlines()[0].strip()
+        if len(subject) > 72:
+            subject = subject[:69] + "..."
+        return subject
 
     def _attempt_index(self, task_id: str) -> int:
         episodes = self.store.load_episodes()

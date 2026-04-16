@@ -111,6 +111,7 @@ class DaemonSettings:
     max_episodes_per_cycle: int = 5
     suggestions_dir: str = "suggestions"
     target_workspace: str = "self"
+    auto_commit_on_accept: bool = True
 
 
 @dataclass

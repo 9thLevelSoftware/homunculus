@@ -168,6 +168,7 @@ class EpisodeRecord:
     failure_stage: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    commit_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
