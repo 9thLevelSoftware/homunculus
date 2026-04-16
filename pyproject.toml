@@ -1,0 +1,26 @@
+[project]
+name = "homunculus"
+version = "0.1.0"
+description = "Teacher-student self-improving coding agent scaffold"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "dasbl" }
+]
+
+[project.scripts]
+homunculus = "homunculus.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+  "homunculus",
+  "homunculus.orchestrator",
+  "homunculus.memory_client",
+  "homunculus.task_runner",
+  "homunculus.dataset_builder",
+  "homunculus.trainer",
+]
