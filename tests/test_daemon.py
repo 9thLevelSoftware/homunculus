@@ -454,5 +454,70 @@ Test task that will fail
             self.assertIn("Simulated orchestrator failure", result.error)
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class LockSafetyTests(unittest.TestCase):
+    """Verify single-instance lock is robust against corrupt content and
+    foreign-PID release."""
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_corrupt_lock_does_not_overwrite_silently(self) -> None:
+        """A corrupt PID file (unparseable) should NOT be silently overwritten."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            daemon = Daemon(config)
+
+            daemon.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            daemon.lock_path.write_text("not-a-pid", encoding="utf-8")
+            original = daemon.lock_path.read_text(encoding="utf-8")
+
+            result = daemon.acquire_lock()
+
+            self.assertFalse(result, "corrupt lock content must NOT be treated as stale")
+            self.assertEqual(
+                daemon.lock_path.read_text(encoding="utf-8"),
+                original,
+                "lock file must not be overwritten when content is corrupt",
+            )
+
+    def test_release_lock_only_removes_own_pid(self) -> None:
+        """release_lock must not delete a lock owned by another process."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            daemon = Daemon(config)
+
+            self.assertTrue(daemon.acquire_lock())
+
+            # Simulate another process taking ownership of the lock file.
+            daemon.lock_path.write_text("99999", encoding="utf-8")
+            daemon.release_lock()
+
+            self.assertTrue(
+                daemon.lock_path.exists(),
+                "lock owned by another PID must NOT be removed",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

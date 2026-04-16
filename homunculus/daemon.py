@@ -81,29 +81,48 @@ class Daemon:
         os.replace(tmp_path, self.state_path)
 
     def acquire_lock(self) -> bool:
-        """Acquire exclusive daemon lock. Returns False if another instance is running."""
+        """Acquire exclusive daemon lock. Returns False if another instance is running.
+
+        Refuses to overwrite a corrupt or unreadable lock file — operator must
+        manually inspect and remove it. This prevents two daemons from running
+        concurrently when the lock content is unparseable.
+        """
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         if self.lock_path.exists():
+            pid_text = ""
             try:
-                pid = int(self.lock_path.read_text(encoding="utf-8").strip())
-                # Check if process is still running (cross-platform)
-                try:
-                    os.kill(pid, 0)  # Signal 0 checks if process exists
-                    return False  # Process exists, lock is held
-                except OSError:
-                    pass  # Process doesn't exist, stale lock
+                pid_text = self.lock_path.read_text(encoding="utf-8").strip()
+                pid = int(pid_text)
             except (ValueError, OSError):
-                pass
+                # Corrupt or unreadable lock — bail out for operator inspection
+                logger.error(
+                    "Lock file %s is corrupt (content=%r). Refusing to start. "
+                    "Inspect and delete manually if no daemon is running.",
+                    self.lock_path, pid_text,
+                )
+                return False
+            try:
+                os.kill(pid, 0)  # signal 0 only checks process existence
+                return False  # process exists — lock is held
+            except OSError:
+                logger.info("Removing stale lock for dead PID %d", pid)
         self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
         return True
 
     def release_lock(self) -> None:
-        """Release daemon lock."""
-        if self.lock_path.exists():
-            try:
-                self.lock_path.unlink()
-            except OSError:
-                pass
+        """Release daemon lock — only if we own it."""
+        if not self.lock_path.exists():
+            return
+        try:
+            owner_pid = int(self.lock_path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            return  # corrupt or vanished lock — don't touch it
+        if owner_pid != os.getpid():
+            return  # not ours
+        try:
+            self.lock_path.unlink()
+        except OSError:
+            pass
 
     @property
     def shutdown_requested(self) -> bool:
