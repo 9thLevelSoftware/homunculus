@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 3 of 5 (Task Generation)
-- **Status**: Phase 3 complete — review passed (2 cycles)
-- **Last Activity**: Phase 3 review passed (2026-04-15)
+- **Phase**: 4 of 5 (Weight Evolution)
+- **Status**: Phase 4 complete — all 4 plans executed successfully
+- **Last Activity**: Phase 4 execution (2026-04-16)
 
 ## Progress
 ```
-[#############.......] 81% — 13/16 plans complete (Phase 0-3 done)
+[#################...] 100% — 17/17 plans complete (Phase 0-4 done)
 ```
 
 ## Completed Work
@@ -136,6 +136,43 @@ Key fixes applied:
 - Defensive dict access in generator prompt formatting
 - FIFO tiebreaker and orchestrator exception tests
 
+## Phase 4 Plan Summary
+
+| Plan | Wave | Title | Agent |
+|------|------|-------|-------|
+| 04-01 | 1 | Infrastructure (Config, Models, Storage) | Senior Developer |
+| 04-02 | 2 | Merge Pipeline | AI Engineer |
+| 04-03 | 2 | Lineage Tracking | Senior Developer |
+| 04-04 | 3 | Validation + Integration | AI Engineer |
+
+### Auto-Refine Applied (1 cycle)
+Critical fixes incorporated:
+- Plan 04-01: Atomic file updates for `update_merge()` using temp file + `os.replace()`
+- Plan 04-02: Added prerequisite task to verify mergekit installation before implementation
+- Plan 04-04: Lazy imports to avoid breaking existing tests, persistent merge failure counter, daemon integration hook, platform-aware coherence validation
+
+## Phase 4 Execution Results
+
+| Plan | Wave | Status | Tests Added |
+|------|------|--------|-------------|
+| 04-01 | 1 | Complete | 13 (infrastructure) |
+| 04-02 | 2 | Complete | 16 (merge pipeline) |
+| 04-03 | 2 | Complete | 10 (lineage tracking) |
+| 04-04 | 3 | Complete | 14 (validation + integration) |
+
+**Total Tests**: 230 (53 new in Phase 4)
+**Commits**: `0b720f9`, `7214c59`, `1159307`
+
+### Phase 4 Verification
+
+| Criteria | Status |
+|----------|--------|
+| `evolution/merge.py` merges LoRA stack to base | Pass |
+| `evolution/lineage.py` tracks full model history | Pass |
+| `evolution/validation.py` catches bad merges | Pass |
+| Merge failure generates introspection task after 3 failures | Pass |
+| Tests cover merge success, failure, and rollback | Pass (53 tests) |
+
 ## Next Action
 
-Run `/legion:plan 4` to plan Phase 4: Weight Evolution
+Run `/legion:review` to verify Phase 4: Weight Evolution

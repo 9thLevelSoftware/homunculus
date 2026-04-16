@@ -5,8 +5,8 @@
 - [x] **Phase 0: Autonomous Bootstrap** — Complete
 - [x] **Phase 1: Daemon Mode** — Complete
 - [x] **Phase 2: Introspection System** — Complete
-- [ ] **Phase 3: Task Generation** — Self-direction
-- [ ] **Phase 4: Weight Evolution** — Self-improvement
+- [x] **Phase 3: Task Generation** — Complete
+- [x] **Phase 4: Weight Evolution** — Complete
 - [ ] **Phase 5: Full Autonomy** — Hands-off
 
 ## Phase Details
@@ -91,7 +91,7 @@
 
 ---
 
-### Phase 3: Task Generation
+### Phase 3: Task Generation (COMPLETE)
 
 **Goal**: Enable self-directed work — agent generates its own tasks from introspection insights.
 
@@ -104,28 +104,28 @@
 **Recommended Agents**: Senior Developer, AI Engineer
 
 **Success Criteria**:
-- [ ] Agent generates tasks from metric trends ("async patches fail 60% → practice async")
-- [ ] Agent generates tasks from self-critique output
-- [ ] Agent evaluates user suggestions for resonance with current weaknesses
-- [ ] Task queue persists across restarts
-- [ ] Prioritization produces sensible ordering
-- [ ] Integration test: introspection → task generation → daemon picks up task
+- [x] Agent generates tasks from metric trends ("async patches fail 60% → practice async")
+- [x] Agent generates tasks from self-critique output
+- [x] Agent evaluates user suggestions for resonance with current weaknesses
+- [x] Task queue persists across restarts
+- [x] Prioritization produces sensible ordering
+- [x] Integration test: introspection → task generation → daemon picks up task
 
-**Plans**: 3-4
+**Plans**: 4 (complete)
 
-**Files to Create**:
+**Files Created**:
 - `homunculus/task_generator/__init__.py`
 - `homunculus/task_generator/generator.py`
 - `homunculus/task_generator/prioritizer.py`
 - `tests/test_task_generator.py`
 
-**Files to Modify**:
-- `homunculus/suggestions.py` — Add resonance evaluation
-- `homunculus/daemon.py` — Integrate task generator into cycle
+**Files Modified**:
+- `homunculus/suggestions.py` — Added resonance evaluation
+- `homunculus/daemon.py` — Integrated task generator into cycle
 
 ---
 
-### Phase 4: Weight Evolution
+### Phase 4: Weight Evolution (COMPLETE)
 
 **Goal**: Enable continuous model improvement — agent trains and merges its own weights.
 
@@ -138,24 +138,26 @@
 **Recommended Agents**: Senior Developer, AI Engineer, Infrastructure & DevOps Engineer
 
 **Success Criteria**:
-- [ ] `evolution/merge.py` successfully merges LoRA stack to base
-- [ ] `evolution/lineage.py` tracks full model history
-- [ ] `evolution/validation.py` catches bad merges before adoption
-- [ ] Merge failure generates introspection task after 3 consecutive failures
-- [ ] Tests cover merge success, merge failure, and rollback scenarios
+- [x] `evolution/merge.py` successfully merges LoRA stack to base
+- [x] `evolution/lineage.py` tracks full model history
+- [x] `evolution/validation.py` catches bad merges before adoption
+- [x] Merge failure generates introspection task after 3 consecutive failures
+- [x] Tests cover merge success, merge failure, and rollback scenarios
 
-**Plans**: 3-4
+**Plans**: 4 (complete)
 
-**Files to Create**:
+**Files Created**:
 - `homunculus/evolution/__init__.py`
 - `homunculus/evolution/merge.py`
 - `homunculus/evolution/lineage.py`
 - `homunculus/evolution/validation.py`
 - `tests/test_evolution.py`
 
-**Files to Modify**:
-- `homunculus/trainer/manager.py` — Integrate merge triggers
-- `homunculus/config.py` — Add `EvolutionSettings` dataclass
+**Files Modified**:
+- `homunculus/trainer/manager.py` — Integrated merge triggers
+- `homunculus/config.py` — Added `EvolutionSettings` dataclass
+- `homunculus/daemon.py` — Added evolution check in cycle loop
+- `homunculus/task_generator/generator.py` — Added merge failure task generation
 
 ---
 
@@ -198,6 +200,6 @@
 | Phase 1: Daemon | 3 | 3 | Complete |
 | Phase 2: Introspection | 5 | 5 | Complete |
 | Phase 3: Task Generation | 4 | 4 | Complete |
-| Phase 4: Weight Evolution | 3-4 | 0 | Not started |
+| Phase 4: Weight Evolution | 4 | 4 | Complete |
 | Phase 5: Full Autonomy | 1-2 | 0 | Not started |
-| **Total** | **16-19** | **9** | **~56% complete** |
+| **Total** | **18-19** | **17** | **~94% complete** |
