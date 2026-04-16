@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,6 +11,11 @@ from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, Introspecti
 
 
 class ArtifactStore:
+    # In-process lock guarding the read-modify-write window in update_merge.
+    # Class-level so multiple ArtifactStore instances pointing at the same
+    # traces dir within one process serialize their merge updates.
+    _merge_update_lock: threading.Lock = threading.Lock()
+
     def __init__(self, config: HomunculusConfig) -> None:
         self.config = config
         self.traces_dir = config.paths.traces_dir
@@ -229,26 +235,30 @@ class ArtifactStore:
     def update_merge(self, manifest: MergeManifest) -> None:
         """Update a merge manifest atomically (temp file + os.replace).
 
-        Follows the same atomic update pattern as update_queue_entry().
+        Holds a class-level lock around the read-modify-write window so that
+        concurrent in-process writers cannot lose appends. The atomic temp
+        file + ``os.replace`` covers crash safety; the lock covers concurrent
+        writers within a single Python process.
         """
         import os
         import tempfile
 
-        merges = self.load_merges()
-        merges = [m if m.merge_id != manifest.merge_id else manifest for m in merges]
-
         path = self.merges_path()
-        # Write to temp file first, then atomic replace
-        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                for m in merges:
-                    handle.write(json.dumps(m.to_dict(), ensure_ascii=True) + "\n")
-            os.replace(tmp_path, path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
+        with type(self)._merge_update_lock:
+            merges = self.load_merges()
+            merges = [m if m.merge_id != manifest.merge_id else manifest for m in merges]
+
+            # Write to temp file first, then atomic replace
+            fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    for m in merges:
+                        handle.write(json.dumps(m.to_dict(), ensure_ascii=True) + "\n")
+                os.replace(tmp_path, path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
 
     # ─────────────────────────────────────────────────────────────────────────
     # Lineage Record Persistence

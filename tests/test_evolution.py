@@ -236,6 +236,105 @@ class EvolutionStorageTests(unittest.TestCase):
         self.assertEqual(result.status, "complete")
         self.assertEqual(result.completed_at, "2026-04-16T12:00:00+00:00")
 
+    def test_update_merge_atomic_no_partial_file(self):
+        """Simulate a write failure mid-update; merges file must remain valid JSONL."""
+        import os
+
+        store = self._make_store()
+        m1 = MergeManifest(
+            merge_id="m-1", source_loras=["a"], target_base="b", merge_method="linear", status="pending"
+        )
+        m2 = MergeManifest(
+            merge_id="m-2", source_loras=["c"], target_base="b", merge_method="linear", status="pending"
+        )
+        store.append_merge(m1)
+        store.append_merge(m2)
+
+        def boom(*_a, **_kw):
+            raise OSError("simulated crash mid-write")
+
+        m1.status = "validated"
+        with patch.object(os, "replace", side_effect=boom):
+            with self.assertRaises(OSError):
+                store.update_merge(m1)
+
+        # Original file must still be valid JSONL with both records intact
+        merges = store.load_merges()
+        self.assertEqual(len(merges), 2)
+        ids = {m.merge_id for m in merges}
+        self.assertEqual(ids, {"m-1", "m-2"})
+        # The pre-update value of m-1 must be preserved (no partial write)
+        self.assertEqual(store.get_merge("m-1").status, "pending")
+
+        # And no .tmp files should remain in the traces dir
+        leftover = list(self.traces_dir.glob("*.tmp"))
+        self.assertEqual(leftover, [], f"temp files leaked: {leftover}")
+
+    def test_update_merge_concurrent_writers_dont_lose_appends(self):
+        """Two threads updating distinct manifests must both have their changes preserved.
+
+        We deterministically expose the read-modify-write race by inserting a
+        ``time.sleep`` between ``load_merges`` and the write. Without the lock,
+        thread B reads stale data before thread A has written, so thread A's
+        update is lost when B writes its (stale) version back.
+        """
+        import threading
+        import time
+
+        store = self._make_store()
+        manifests = [
+            MergeManifest(
+                merge_id=f"merge-{i}",
+                source_loras=["a"],
+                target_base="b",
+                merge_method="linear",
+                status="pending",
+            )
+            for i in range(4)
+        ]
+        for m in manifests:
+            store.append_merge(m)
+
+        errors: list[BaseException] = []
+        original_load = store.load_merges
+        call_count = {"n": 0}
+
+        def slow_load():
+            # First call sleeps to give other threads a chance to also load
+            # the pre-update state. Subsequent calls return immediately.
+            call_count["n"] += 1
+            if call_count["n"] <= len(manifests):
+                time.sleep(0.05)
+            return original_load()
+
+        store.load_merges = slow_load  # type: ignore[method-assign]
+
+        def worker(idx: int):
+            try:
+                m = manifests[idx]
+                m.status = f"validated-{idx}"
+                store.update_merge(m)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(manifests))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"worker errors: {errors}")
+        merges = original_load()
+        self.assertEqual(len(merges), len(manifests))
+        # Every manifest's status update must have landed
+        by_id = {m.merge_id: m for m in merges}
+        for i in range(len(manifests)):
+            self.assertEqual(
+                by_id[f"merge-{i}"].status,
+                f"validated-{i}",
+                f"lost update on merge-{i} (race condition)",
+            )
+
     def test_append_and_load_lineage(self):
         store = self._make_store()
         record = LineageRecord(
