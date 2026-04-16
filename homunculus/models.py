@@ -258,6 +258,7 @@ class AdapterManifest:
     self_generated_ratio: float = 0.0
     evaluation_status: str = "pending"
     training_output: dict[str, Any] = field(default_factory=dict)
+    contributing_episode_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

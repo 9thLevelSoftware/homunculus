@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from ..config import HomunculusConfig
 from ..dataset_builder.builder import DatasetBuilder
@@ -84,6 +87,16 @@ class TrainingManager:
         ]
         if self.config.student.prompt_masking:
             command.append("--mask-prompt")
+        # Aggregate contributing episode ids from the snapshot's split-keyed map.
+        # Used downstream by lineage tracking (register_lora) so future merges can
+        # trace which episodes contributed to a candidate.
+        contributing_episodes: list[str] = []
+        seen: set[str] = set()
+        for split_episodes in (snapshot.selected_episode_ids or {}).values():
+            for ep_id in split_episodes:
+                if ep_id and ep_id not in seen:
+                    seen.add(ep_id)
+                    contributing_episodes.append(ep_id)
         manifest = AdapterManifest(
             model_id=self.config.student.model_id,
             base_model=self.config.student.model_id,
@@ -100,6 +113,7 @@ class TrainingManager:
             sample_counts=snapshot.sample_counts,
             self_generated_ratio=snapshot.self_generated_ratio,
             evaluation_status="pending",
+            contributing_episode_ids=contributing_episodes,
         )
         self.store.register_candidate(manifest)
         if simulate:
@@ -150,6 +164,19 @@ class TrainingManager:
             candidate.promotion_reason = "passed promotion gates"
             self.store.update_candidate(candidate)
             self.store.set_active_candidate(candidate)
+            # Register in lineage so subsequent merges can trace ancestry.
+            # Lineage is observability — failures must not crash promotion.
+            try:
+                self.lineage_tracker.register_lora(
+                    candidate,
+                    episode_ids=list(candidate.contributing_episode_ids or []),
+                )
+            except Exception as exc:  # noqa: BLE001 — observability path
+                logger.warning(
+                    "Failed to register candidate %s in lineage: %s",
+                    candidate.candidate_id,
+                    exc,
+                )
             return candidate
         candidate.status = "rejected"
         candidate.evaluation_status = "ineligible"
