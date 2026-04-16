@@ -803,5 +803,175 @@ class DaemonIntrospectionIntegrationTests(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class DaemonE2EIntrospectionToTaskTests(unittest.TestCase):
+    """End-to-end: failed episodes -> introspection finding -> generated task -> daemon executes it.
+
+    This is the integration the Phase 3 CONTEXT.md success criterion requires.
+    Closes the seam between Phase 1 (daemon), Phase 2 (introspection),
+    and Phase 3 (task generation).
+
+    Why this matters: Tasks 4, 9-13 individually wired the components, but
+    until now no test exercised the full pipeline together. A refactor that
+    breaks scheduler invocation, finding-to-task conversion, prioritizer
+    pass-through, or orchestrator dispatch could go undetected.
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _make_failed_episode(self, index: int) -> "EpisodeRecord":
+        """Build a minimally-valid EpisodeRecord with outcome=error.
+
+        Using outcome='error' (not 'reverted') because MetricsMode's
+        high_error_rate finding fires on error_rate > 0.1 and emits
+        severity='critical', which the TaskGenerator turns into an
+        actionable task. 'reverted' would only surface via the
+        failure_concentration finding, which depends on failure_stage
+        rather than outcome — a less direct path with more brittleness.
+        """
+        from homunculus.models import EpisodeRecord
+
+        return EpisodeRecord(
+            episode_id=f"ep-{index:03d}",
+            task_id=f"task-{index:03d}",
+            workspace="self",
+            prompt="seed prompt for failed episode",
+            plan=["step 1"],
+            teacher_output={},
+            student_output={},
+            diff_hash=f"hash{index}",
+            test_results=[],
+            lint_results=[],
+            outcome="error",
+            timestamp="2026-04-15T00:00:00+00:00",
+            attempt_index=1,
+            source="self-generated",
+        )
+
+    def _build_setup(
+        self, temp_path: Path
+    ) -> tuple[Daemon, ArtifactStore, MagicMock]:
+        """Build daemon + store + mock orchestrator with seeded failed episodes."""
+        config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+        # Force metrics mode to be due every cycle; disable critique to avoid
+        # teacher API. Coverage and comparative are harmless against an empty
+        # baseline but shouldn't be needed; leave defaults so we exercise the
+        # real scheduler logic.
+        config.introspection.enabled = True
+        config.introspection.metrics_interval = 1
+        config.introspection.critique_enabled = False
+        config.introspection.window_size = 50
+        # Disable evolution so _check_evolution doesn't try to merge during
+        # the test (no candidates exist anyway, but skip the code path).
+        config.evolution.enabled = False
+
+        store = ArtifactStore(config)
+        store.ensure_layout()
+
+        # Seed 10 failed episodes — error_rate=1.0 dwarfs the 0.1 threshold
+        # and forces MetricsMode to emit a 'high_error_rate' critical finding.
+        for i in range(10):
+            store.append_episode(self._make_failed_episode(i))
+
+        # Mock orchestrator records every dispatched task and returns an
+        # accepted episode-like result so the cycle completes cleanly.
+        orchestrator = MagicMock()
+        accepted_episode = MagicMock()
+        accepted_episode.outcome = "accepted"
+        accepted_episode.episode_id = "next-ep"
+        orchestrator.run_episode.return_value = accepted_episode
+
+        daemon = Daemon(config, orchestrator=orchestrator, store=store)
+        return daemon, store, orchestrator
+
+    def test_failed_episodes_become_executed_tasks(self) -> None:
+        """The full pipeline must dispatch an introspection-sourced task to the orchestrator."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store, orch = self._build_setup(temp_path)
+
+            # Cycle 0 is skipped by the scheduler (modulo edge case); prime
+            # cycles_completed to 1 so the first run_once() is a real cycle.
+            daemon.state.cycles_completed = 1
+
+            # Cycle 1: introspection runs, writes a finding, task generator
+            # picks it up (introspection runs first inside run_once), and the
+            # orchestrator should be invoked with at least one introspection task.
+            result1 = daemon.run_once()
+            self.assertEqual(
+                result1.status, "executed",
+                f"Cycle 1 should execute at least one task, got {result1.status} "
+                f"(error={result1.error})",
+            )
+
+            # Verify the introspection seam wrote at least one result.
+            results = store.load_introspection_results()
+            self.assertGreater(
+                len(results), 0,
+                "Expected at least one introspection result after run_once; "
+                "scheduler may not have invoked any modes.",
+            )
+            # And at least one of those results has actionable findings.
+            metrics_results = [r for r in results if r.mode == "metrics"]
+            self.assertGreater(
+                len(metrics_results), 0,
+                f"Expected metrics introspection result; got modes={[r.mode for r in results]}",
+            )
+            finding_types = {
+                f.get("type")
+                for r in metrics_results
+                for f in r.findings
+            }
+            self.assertIn(
+                "high_error_rate", finding_types,
+                f"Expected MetricsMode to flag high_error_rate given 10/10 errored "
+                f"episodes; got finding types={finding_types}",
+            )
+
+            # Cycle 2 for good measure — confirms the loop is stable across
+            # cycles, not a one-shot accident.
+            daemon.state.cycles_completed = 2
+            daemon.run_once()
+
+            # Aggregate across both cycles: at least one dispatched task must
+            # carry source='introspection'. This is the full-pipeline assertion.
+            all_calls = orch.run_episode.call_args_list
+            self.assertGreater(
+                len(all_calls), 0,
+                "Orchestrator.run_episode was never called; pipeline is broken.",
+            )
+            sources = []
+            for call in all_calls:
+                # task_request is the first positional arg; its metadata['source']
+                # is set by GeneratedTask.to_task_request().
+                task_request = call.args[0]
+                meta = getattr(task_request, "metadata", {}) or {}
+                sources.append(meta.get("source"))
+            self.assertIn(
+                "introspection", sources,
+                f"Expected at least one task with source='introspection' to reach "
+                f"the orchestrator; got sources={sources}. This means the seam "
+                f"between TaskGenerator -> prioritizer -> daemon dispatch is "
+                f"broken or the introspection finding never produced a task.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
