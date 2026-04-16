@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import unittest
 
 from homunculus.config import load_config
@@ -541,6 +541,152 @@ class LockSafetyTests(unittest.TestCase):
                 daemon.lock_path.exists(),
                 "lock owned by another PID must NOT be removed",
             )
+
+
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class SuggestionArchivalTests(unittest.TestCase):
+    """Verify daemon archives suggestion files on every terminal outcome.
+
+    Regression: blocked/error outcomes previously left suggestion files in
+    the queue forever, causing infinite re-attempts on poison inputs (e.g.,
+    a suggestion that hits a guardrail block on every cycle).
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _build_daemon_with_outcome(
+        self, temp_path: Path, outcome: str
+    ) -> tuple[Daemon, str]:
+        """Build a daemon whose orchestrator returns an EpisodeRecord with the
+        given outcome, and a real suggestion file in the queue.
+
+        Returns (daemon, filename). The daemon's suggestion_reader.archive
+        is replaced with a MagicMock so tests can assert on calls.
+        """
+        config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+
+        # Real suggestion file in the queue so the source_path is valid.
+        suggestions_dir = temp_path / "suggestions"
+        suggestions_dir.mkdir()
+        filename = "poison-task.md"
+        (suggestions_dir / filename).write_text(
+            "# Poison Task\n\n## Priority\nHIGH\n\n## What\nWill be blocked or errored\n",
+            encoding="utf-8",
+        )
+
+        # Mock orchestrator returns an EpisodeRecord-like object with the outcome.
+        episode = MagicMock()
+        episode.outcome = outcome
+        episode.episode_id = "ep-test"
+
+        orchestrator = MagicMock()
+        orchestrator.run_episode.return_value = episode
+
+        daemon = Daemon(
+            config,
+            orchestrator=orchestrator,
+            suggestions_dir=suggestions_dir,
+        )
+        # Spy on archive AFTER construction so we can assert on calls without
+        # actually moving the file.
+        daemon.suggestion_reader = MagicMock(wraps=daemon.suggestion_reader)
+        # Re-stub read_pending so the spy returns the same task list.
+        real_tasks = SuggestionArchivalTests._read_real_tasks(suggestions_dir)
+        daemon.suggestion_reader.read_pending.return_value = real_tasks
+        daemon.suggestion_reader.read_pending_with_resonance.return_value = real_tasks
+        return daemon, filename
+
+    @staticmethod
+    def _read_real_tasks(suggestions_dir: Path) -> list[GeneratedTask]:
+        """Use a fresh reader (not mocked) to parse the on-disk suggestions.
+
+        We do this so tasks have realistic context['filename'] values, which is
+        the key the archival branch uses to identify the source file.
+        """
+        from homunculus.suggestions import SuggestionReader
+
+        return SuggestionReader(suggestions_dir).read_pending()
+
+    def test_blocked_outcome_archives_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, filename = self._build_daemon_with_outcome(temp_path, "blocked")
+
+            daemon.run_once()
+
+            daemon.suggestion_reader.archive.assert_called_once()
+            args, _ = daemon.suggestion_reader.archive.call_args
+            self.assertEqual(args[0], filename)
+            self.assertEqual(args[1], "blocked")
+
+    def test_error_outcome_archives_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, filename = self._build_daemon_with_outcome(temp_path, "error")
+
+            daemon.run_once()
+
+            daemon.suggestion_reader.archive.assert_called_once()
+            args, _ = daemon.suggestion_reader.archive.call_args
+            self.assertEqual(args[0], filename)
+            self.assertEqual(args[1], "error")
+
+    def test_accepted_outcome_still_archives(self) -> None:
+        """Regression: don't break existing accepted-path archival."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, filename = self._build_daemon_with_outcome(temp_path, "accepted")
+
+            daemon.run_once()
+
+            daemon.suggestion_reader.archive.assert_called_once()
+            args, _ = daemon.suggestion_reader.archive.call_args
+            self.assertEqual(args[0], filename)
+            self.assertEqual(args[1], "accepted")
+
+    def test_reverted_outcome_still_archives(self) -> None:
+        """Regression: don't break existing reverted-path archival."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, filename = self._build_daemon_with_outcome(temp_path, "reverted")
+
+            daemon.run_once()
+
+            daemon.suggestion_reader.archive.assert_called_once()
+            args, _ = daemon.suggestion_reader.archive.call_args
+            self.assertEqual(args[0], filename)
+            self.assertEqual(args[1], "reverted")
+
+    def test_archive_failure_does_not_crash_cycle(self) -> None:
+        """Archive raising should be logged, not propagated."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, _ = self._build_daemon_with_outcome(temp_path, "blocked")
+            daemon.suggestion_reader.archive.side_effect = OSError("disk full")
+
+            # Must not raise.
+            result = daemon.run_once()
+
+            # Cycle still completes successfully (archive failure is non-fatal).
+            self.assertEqual(result.status, "executed")
+            self.assertEqual(result.tasks_executed, 1)
 
 
 if __name__ == "__main__":

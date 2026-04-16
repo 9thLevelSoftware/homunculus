@@ -269,14 +269,26 @@ class Daemon:
                 task_request = task.to_task_request(target_workspace)
                 episode = self.orchestrator.run_episode(task_request)
                 executed += 1
-                filename = task.context.get("filename", "")
-                if episode.outcome == "accepted":
+                outcome = (getattr(episode, "outcome", "") or "").lower()
+                if outcome == "accepted":
                     accepted += 1
-                    self.suggestion_reader.archive(filename, "accepted")
-                else:
+                elif outcome == "reverted":
                     reverted += 1
-                    if episode.outcome == "reverted":
-                        self.suggestion_reader.archive(filename, "reverted")
+                # Archive on EVERY terminal outcome so poison inputs (blocked
+                # by guardrails, or orchestrator errors) don't loop forever
+                # in the suggestions queue. Wrapped in try/except so an
+                # archive failure (disk full, permission, race) can't crash
+                # the cycle.
+                if outcome in {"accepted", "reverted", "blocked", "error"}:
+                    filename = task.context.get("filename", "")
+                    if filename:
+                        try:
+                            self.suggestion_reader.archive(filename, outcome)
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to archive suggestion %s (outcome=%s): %s",
+                                filename, outcome, exc,
+                            )
             except Exception as e:
                 return DaemonCycleResult(
                     status="error",
