@@ -3,8 +3,12 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .models import GeneratedTask, utc_now
+
+if TYPE_CHECKING:
+    from .models import IntrospectionResult
 
 
 class SuggestionReader:
@@ -14,6 +18,20 @@ class SuggestionReader:
         "HIGH": 1.0,
         "MEDIUM": 0.5,
         "LOW": 0.2,
+    }
+
+    # Keywords derived from introspection mode outputs
+    RESONANCE_KEYWORDS = {
+        "error": ["error", "exception", "handling", "try", "catch", "raise", "fail", "retry"],
+        "testing": ["test", "coverage", "assert", "unittest", "pytest", "mock", "gap", "suite"],
+        "async": ["async", "await", "concurrent", "parallel", "thread", "coroutine"],
+        "performance": ["performance", "speed", "optimize", "cache", "fast", "slow", "memory"],
+        "security": ["security", "auth", "permission", "token", "secret", "credential"],
+        "documentation": ["doc", "readme", "comment", "docstring", "todo"],
+        "refactor": ["refactor", "clean", "simplify", "extract", "rename", "consolidate"],
+        "patching": ["patch", "diff", "change", "modify", "edit", "fix"],
+        "planning": ["plan", "step", "approach", "strategy", "design"],
+        "lifecycle": ["execute", "reflect", "curate", "assess", "preflight"],
     }
 
     def __init__(self, suggestions_dir: Path) -> None:
@@ -84,6 +102,82 @@ class SuggestionReader:
             context={"filename": md_file.name},
             created_at=utc_now(),
         )
+
+    def _extract_keywords(self, text: str) -> set[str]:
+        """Extract normalized keyword categories from text."""
+        text_lower = text.lower()
+        found: set[str] = set()
+        for category, keywords in self.RESONANCE_KEYWORDS.items():
+            if any(kw in text_lower for kw in keywords):
+                found.add(category)
+        return found
+
+    def score_resonance(
+        self,
+        task: GeneratedTask,
+        introspection_results: list["IntrospectionResult"],
+    ) -> float:
+        """Score how well a task aligns with current introspection insights.
+
+        Returns: Resonance score from 0.0 (no alignment) to 1.0 (perfect alignment)
+        """
+        if not introspection_results:
+            return 0.0
+
+        task_keywords = self._extract_keywords(task.prompt)
+        if task.success_criteria:
+            task_keywords |= self._extract_keywords(task.success_criteria)
+
+        if not task_keywords:
+            return 0.0
+
+        total_score = 0.0
+        total_weight = 0.0
+
+        for i, result in enumerate(introspection_results):
+            weight = max(0.4, 1.0 - (i * 0.2))  # Decay from 1.0 to 0.4
+
+            result_keywords: set[str] = set()
+            for rec in result.recommendations:
+                result_keywords |= self._extract_keywords(rec)
+            for finding in result.findings:
+                if "area" in finding:
+                    result_keywords |= self._extract_keywords(str(finding["area"]))
+                if "description" in finding:
+                    result_keywords |= self._extract_keywords(str(finding["description"]))
+
+            if result_keywords:
+                intersection = task_keywords & result_keywords
+                union = task_keywords | result_keywords
+                similarity = len(intersection) / len(union) if union else 0.0
+                total_score += similarity * weight
+                total_weight += weight
+
+        return total_score / total_weight if total_weight > 0 else 0.0
+
+    def read_pending_with_resonance(
+        self,
+        introspection_results: list["IntrospectionResult"],
+        resonance_boost: float = 0.3,
+    ) -> list[GeneratedTask]:
+        """Read pending suggestions with priority boosted by resonance.
+
+        Args:
+            introspection_results: Recent introspection results for scoring
+            resonance_boost: Maximum boost to add (0.0-1.0)
+
+        Returns:
+            List of tasks with adjusted priorities, sorted by priority descending
+        """
+        tasks = self.read_pending()
+
+        for task in tasks:
+            resonance = self.score_resonance(task, introspection_results)
+            boost = resonance * resonance_boost
+            task.priority = min(1.0, task.priority + boost)
+
+        tasks.sort(key=lambda t: t.priority, reverse=True)
+        return tasks
 
     def _extract_title(self, content: str) -> str:
         """Extract the H1 title from markdown."""
