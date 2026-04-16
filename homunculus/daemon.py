@@ -76,6 +76,23 @@ class Daemon:
         self.task_generator = TaskGenerator(store) if store else None
         self.prioritizer = TaskPrioritizer()
 
+        # In-memory daemon state. Populated lazily on first access so that
+        # callers using only run_once() (e.g., tests, --once mode) can still
+        # supply a cycle_number for introspection. run_continuous() owns the
+        # persistence side-effects via load_state()/save_state().
+        self.state: DaemonState = DaemonState()
+
+        # Introspection scheduler — Phase 2 → Phase 3 integration. Gated on
+        # config.introspection.enabled AND store availability: modes need a
+        # store in their context, so without one we skip execution entirely.
+        if config.introspection.enabled and store is not None:
+            from .introspection import IntrospectionScheduler
+            self.introspection_scheduler: "IntrospectionScheduler | None" = (
+                IntrospectionScheduler(config, store=store)
+            )
+        else:
+            self.introspection_scheduler = None
+
     @property
     def state_path(self) -> Path:
         return self.config.paths.runtime_dir / "daemon_state.json"
@@ -189,6 +206,37 @@ class Daemon:
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, handle_shutdown)
 
+    def _run_introspection(self) -> None:
+        """Run any due introspection modes for the current cycle and persist them.
+
+        Phase 2 → Phase 3 integration: this is what makes the
+        introspection → task-generation → episode loop actually close in
+        production. Without this call, no introspection results are ever
+        written at runtime, and Phase 3's task generator (which reads recent
+        introspection) has nothing to work with.
+
+        Failures in scheduling or any single mode are logged and swallowed —
+        introspection is opportunistic and must never crash the daemon cycle.
+        Persistence failures are likewise logged per-result, not propagated.
+        """
+        if self.introspection_scheduler is None or self.store is None:
+            return
+        try:
+            results = self.introspection_scheduler.run_due_modes(
+                cycle_number=self.state.cycles_completed,
+            )
+        except Exception as exc:
+            logger.warning("Introspection cycle failed: %s", exc)
+            return
+        for result in results or []:
+            try:
+                self.store.append_introspection_result(result)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist introspection result (mode=%s): %s",
+                    getattr(result, "mode", "<unknown>"), exc,
+                )
+
     def _get_recent_introspection(self) -> list["IntrospectionResult"]:
         """Load recent introspection results for task generation.
 
@@ -246,7 +294,11 @@ class Daemon:
         return self.prioritizer.prioritize(all_tasks, introspection_results)
 
     def run_once(self) -> DaemonCycleResult:
-        """Execute one daemon cycle: get tasks, run episodes, return."""
+        """Execute one daemon cycle: introspection → tasks → episodes → evolution check."""
+        # Run introspection first so that task generation (which reads recent
+        # introspection results) sees freshly-computed signals, not stale ones.
+        self._run_introspection()
+
         tasks = self.get_pending_tasks()
 
         if not tasks:
@@ -374,7 +426,10 @@ class Daemon:
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""
         self._setup_signal_handlers()
-        state = self.load_state()
+        # Mirror persisted state into self.state so run_once()'s introspection
+        # call sees the right cycle_number across daemon restarts.
+        self.state = self.load_state()
+        state = self.state
         interval_seconds = self.config.daemon.cycle_interval_minutes * 60
 
         print(f"Daemon started. Cycle interval: {self.config.daemon.cycle_interval_minutes} minutes")
@@ -382,11 +437,15 @@ class Daemon:
         print("Press Ctrl+C to stop gracefully.")
 
         while not self.shutdown_requested:
+            # Increment BEFORE running the cycle so the introspection scheduler
+            # sees a 1-indexed cycle number (cycle 0 is skipped by the scheduler
+            # to avoid the modulo-zero edge case).
+            state.cycles_completed += 1
+
             # Run a cycle
             result = self.run_once()
 
-            # Update state
-            state.cycles_completed += 1
+            # Update remaining state
             state.last_cycle_at = utc_now()
             state.episodes_this_cycle = result.tasks_executed
             state.total_episodes += result.tasks_executed

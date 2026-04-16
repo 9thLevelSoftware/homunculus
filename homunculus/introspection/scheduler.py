@@ -1,11 +1,17 @@
-"""Scheduler for determining which introspection modes run each cycle."""
+"""Scheduler for determining and executing which introspection modes run each cycle."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config import HomunculusConfig
+    from ..models import IntrospectionResult
+    from ..orchestrator.teacher import OpenAICompatibleTeacher
+    from ..storage import ArtifactStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,9 +54,26 @@ class IntrospectionScheduler:
     - comparative: every 3 cycles
     """
 
-    def __init__(self, config: "HomunculusConfig") -> None:
+    def __init__(
+        self,
+        config: "HomunculusConfig",
+        store: "ArtifactStore | None" = None,
+        teacher: "OpenAICompatibleTeacher | None" = None,
+    ) -> None:
+        """Initialize the scheduler.
+
+        Args:
+            config: Homunculus config (used for introspection settings).
+            store: Optional artifact store. Required for run_due_modes() to
+                execute modes (modes need a store in their context). When None,
+                only get_scheduled_modes() (pure scheduling) is usable.
+            teacher: Optional teacher client for CritiqueMode. When None,
+                CritiqueMode will create its own teacher from config at run time.
+        """
         self.config = config
         self.settings = config.introspection
+        self.store = store
+        self.teacher = teacher
 
     def get_scheduled_modes(self, cycle_number: int) -> ScheduledModes:
         """Determine which modes should run for the given cycle number.
@@ -87,30 +110,66 @@ class IntrospectionScheduler:
 
         return modes
 
+    def run_due_modes(self, cycle_number: int) -> list["IntrospectionResult"]:
+        """Execute all introspection modes that are due for the given cycle.
 
-# =============================================================================
-# Daemon Integration Point (for future implementation)
-# =============================================================================
-#
-# In daemon.py run_once() or run_continuous(), after incrementing cycle count:
-#
-#     from .introspection.scheduler import IntrospectionScheduler
-#     from .introspection import IntrospectionContext
-#
-#     scheduler = IntrospectionScheduler(self.config)
-#     modes = scheduler.get_scheduled_modes(state.cycles_completed)
-#
-#     if modes.any_scheduled():
-#         context = IntrospectionContext(
-#             store=store,
-#             config=self.config,
-#             cycle_number=state.cycles_completed,
-#             window_size=self.config.introspection.window_size,
-#         )
-#
-#         for mode_name in modes.scheduled_names():
-#             mode = get_introspection_mode(mode_name)  # Factory lookup
-#             result = mode.run(context)
-#             store.append_introspection_result(result)
-#
-# =============================================================================
+        Determines which modes are scheduled via get_scheduled_modes(), then
+        runs each one against an IntrospectionContext built from this scheduler's
+        store and config. Failures in any single mode are logged and skipped —
+        a broken mode does not prevent the others from running.
+
+        This is the entry point the daemon uses each cycle. Persistence of the
+        returned results is the caller's responsibility (the daemon writes them
+        via store.append_introspection_result).
+
+        Args:
+            cycle_number: Current daemon cycle (1-indexed; cycle 0 is skipped
+                by get_scheduled_modes to avoid the modulo-zero edge case).
+
+        Returns:
+            List of IntrospectionResult, one per mode that ran successfully.
+            Empty list when introspection is disabled, no modes are due,
+            or no store is configured.
+        """
+        if self.store is None:
+            logger.debug(
+                "IntrospectionScheduler.run_due_modes called without a store; "
+                "skipping execution (modes need a store in their context)."
+            )
+            return []
+
+        scheduled = self.get_scheduled_modes(cycle_number)
+        if not scheduled.any_scheduled():
+            return []
+
+        # Lazy import to keep scheduler.py free of circular import risk.
+        from . import get_introspection_mode
+        from .base import IntrospectionContext
+
+        context = IntrospectionContext(
+            store=self.store,
+            config=self.config,
+            cycle_number=cycle_number,
+            window_size=self.settings.window_size,
+        )
+
+        results: list[IntrospectionResult] = []
+        for mode_name in scheduled.scheduled_names():
+            try:
+                mode = get_introspection_mode(mode_name)
+                # Critique mode accepts an optional teacher via constructor.
+                # The factory builds it without args; if we have a teacher,
+                # rebuild with it so we don't pay for a second teacher client.
+                if mode_name == "critique" and self.teacher is not None:
+                    from .critique import CritiqueMode
+                    mode = CritiqueMode(teacher=self.teacher)
+                result = mode.run(context)
+            except Exception as exc:
+                logger.warning(
+                    "Introspection mode %r failed during cycle %d: %s",
+                    mode_name, cycle_number, exc,
+                )
+                continue
+            results.append(result)
+
+        return results

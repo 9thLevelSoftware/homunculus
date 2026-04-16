@@ -689,5 +689,119 @@ class SuggestionArchivalTests(unittest.TestCase):
             self.assertEqual(result.tasks_executed, 1)
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class DaemonIntrospectionIntegrationTests(unittest.TestCase):
+    """Verify daemon.run_once invokes the IntrospectionScheduler and persists results.
+
+    This is the integration that closes the self-improvement loop in production:
+    Phase 2 introspection → Phase 3 task generation → episode execution.
+    Before this wiring, modes existed but were never invoked at runtime.
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _build_daemon(self, temp_path: Path) -> tuple[Daemon, ArtifactStore]:
+        """Build a daemon with a real ArtifactStore so we can observe persisted
+        introspection results.
+
+        Critique mode is disabled to avoid teacher API dependency in this test.
+        Metrics, coverage, and comparative modes run against an empty episodes
+        list and produce well-formed (if mostly empty) results.
+        """
+        config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+        # Force every mode (except critique) to be due on cycle 1.
+        config.introspection.enabled = True
+        config.introspection.metrics_interval = 1
+        config.introspection.critique_interval = 1
+        config.introspection.coverage_interval = 1
+        config.introspection.comparative_interval = 1
+        config.introspection.critique_enabled = False  # Avoid teacher dependency
+
+        store = ArtifactStore(config)
+        store.ensure_layout()
+
+        # Stub orchestrator so we don't actually run episodes.
+        orchestrator = MagicMock()
+        orchestrator.run_episode.return_value = None
+
+        daemon = Daemon(config, orchestrator=orchestrator, store=store)
+        return daemon, store
+
+    def test_run_once_invokes_scheduler_and_persists_result(self) -> None:
+        """run_once must invoke at least one introspection mode and persist its result."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+
+            # Cycle 0 is skipped by the scheduler (modulo edge case),
+            # so prime cycles_completed to 1 BEFORE the first run.
+            daemon.state = daemon.load_state()
+            daemon.state.cycles_completed = 1
+
+            daemon.run_once()
+
+            results = store.load_introspection_results()
+            self.assertGreaterEqual(
+                len(results), 1,
+                "Daemon.run_once should have invoked at least one introspection mode",
+            )
+            self.assertIsInstance(results[0], IntrospectionResult)
+            # All persisted results should have valid mode names from the registry
+            valid_modes = {"metrics", "critique", "coverage", "comparative"}
+            for r in results:
+                self.assertIn(r.mode, valid_modes)
+
+    def test_run_once_without_store_skips_introspection(self) -> None:
+        """When daemon has no store, introspection is skipped without error."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+            config.introspection.enabled = True
+
+            daemon = Daemon(config)  # No store
+            # Should not raise
+            result = daemon.run_once()
+            self.assertEqual(result.status, "idle")
+
+    def test_run_once_with_introspection_disabled_skips(self) -> None:
+        """When introspection is disabled in config, no results are persisted."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, store = self._build_daemon(temp_path)
+            daemon.config.introspection.enabled = False
+            # Rebuild scheduler-aware fields if needed by exposing a hook.
+            # Easier: rebuild the daemon with disabled introspection.
+            daemon = Daemon(
+                daemon.config,
+                orchestrator=daemon.orchestrator,
+                store=store,
+            )
+
+            daemon.run_once()
+
+            results = store.load_introspection_results()
+            self.assertEqual(
+                len(results), 0,
+                "No introspection results should be persisted when disabled",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
