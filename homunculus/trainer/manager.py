@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
@@ -208,19 +209,41 @@ class TrainingManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_consecutive_merge_failures(self) -> int:
-        """Get consecutive merge failures from persistent state."""
+        """Get consecutive merge failures from persistent state.
+
+        Defaults to 0 on any error: missing file, corrupt JSON, missing key,
+        non-int value, negative value. This prevents an interrupted/corrupt
+        state file from crashing the daemon's _check_evolution cycle.
+        """
         state_file = self.config.paths.runtime_dir / "evolution_state.json"
         if not state_file.exists():
             return 0
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        return data.get("consecutive_merge_failures", 0)
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        value = data.get("consecutive_merge_failures", 0)
+        # bool is a subclass of int — exclude it explicitly.
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return 0
+        return value
 
     def _set_consecutive_merge_failures(self, count: int) -> None:
-        """Persist consecutive merge failure count."""
+        """Persist consecutive merge failure count atomically.
+
+        Writes to a temp file then os.replace's into place so an
+        interrupted write never produces a partial JSON.
+        """
         state_file = self.config.paths.runtime_dir / "evolution_state.json"
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {"consecutive_merge_failures": count}
-        state_file.write_text(json.dumps(data), encoding="utf-8")
+        tmp_file = state_file.with_suffix(state_file.suffix + ".tmp")
+        tmp_file.write_text(
+            json.dumps({"consecutive_merge_failures": int(max(0, count))}),
+            encoding="utf-8",
+        )
+        os.replace(tmp_file, state_file)
 
     def should_merge(self) -> bool:
         """Check if we should trigger a merge operation."""

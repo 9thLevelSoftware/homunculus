@@ -1405,5 +1405,63 @@ class CoherenceTokenSlicingTests(unittest.TestCase):
         )
 
 
+class EvolutionStateResilienceTests(unittest.TestCase):
+    """Verify trainer evolution_state.json parsing is crash-safe.
+
+    Regression for: corrupt JSON, non-int values, negative values must
+    all default to 0 instead of propagating exceptions or wrong types.
+    Writes must be atomic so an interrupted write can't produce a partial file.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.temp_dir.name) / "runtime"
+        self.runtime.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _make_mgr(self):
+        from homunculus.trainer.manager import TrainingManager
+
+        config = MagicMock()
+        config.evolution.enabled = True
+        config.evolution.max_merge_attempts = 3
+        config.paths.runtime_dir = self.runtime
+        return TrainingManager(config, store=MagicMock(), builder=MagicMock())
+
+    def test_corrupt_json_returns_zero(self):
+        (self.runtime / "evolution_state.json").write_text(
+            "not json{", encoding="utf-8"
+        )
+        self.assertEqual(self._make_mgr()._get_consecutive_merge_failures(), 0)
+
+    def test_non_int_value_returns_zero(self):
+        (self.runtime / "evolution_state.json").write_text(
+            '{"consecutive_merge_failures": "abc"}', encoding="utf-8"
+        )
+        self.assertEqual(self._make_mgr()._get_consecutive_merge_failures(), 0)
+
+    def test_negative_value_returns_zero(self):
+        (self.runtime / "evolution_state.json").write_text(
+            '{"consecutive_merge_failures": -5}', encoding="utf-8"
+        )
+        self.assertEqual(self._make_mgr()._get_consecutive_merge_failures(), 0)
+
+    def test_set_is_atomic_no_temp_files_left(self):
+        mgr = self._make_mgr()
+        mgr._set_consecutive_merge_failures(7)
+        self.assertEqual(mgr._get_consecutive_merge_failures(), 7)
+        # Verify temp file does not linger
+        leftovers = [
+            p for p in self.runtime.glob("evolution_state.json*")
+            if p.name != "evolution_state.json"
+        ]
+        self.assertEqual(
+            leftovers, [],
+            f"unexpected temp file leftovers: {leftovers}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
