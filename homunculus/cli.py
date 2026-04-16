@@ -4,9 +4,15 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 
+from .autonomy import generate_report
+from .autonomy.acceptance import render_acceptance_markdown, validate_acceptance
+from .autonomy.preflight import format_preflight_table, run_preflight
+from .config import load_config
 from .models import EvaluationMetrics, TaskRequest
 from .runtime import build_runtime
 from .task_runner.runner import WorkspacePreflightError
@@ -120,6 +126,119 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if not failed else 1
 
 
+_DAY_PATTERN = re.compile(r"^DAY-(\d+)$", re.IGNORECASE)
+
+
+def _parse_since(value: str | None) -> datetime | None:
+    """Parse ``--since`` flag accepting ``DAY-N`` or ISO-8601 timestamp."""
+    if not value:
+        return None
+    match = _DAY_PATTERN.match(value.strip())
+    if match:
+        days = int(match.group(1))
+        return datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --since value {value!r}: {exc}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def cmd_autonomy_preflight(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    result = run_preflight(config)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(format_preflight_table(result))
+    return 0 if result.passed else 1
+
+
+def cmd_autonomy_report(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    since = _parse_since(args.since)
+    report = generate_report(
+        runtime_dir=config.paths.runtime_dir,
+        traces_dir=config.paths.traces_dir,
+        models_dir=config.paths.models_dir,
+        since=since,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        _print_report_table(report)
+    return 0
+
+
+def _print_report_table(report) -> None:
+    rows: list[tuple[str, str]] = [
+        ("generated_at", report.generated_at.isoformat()),
+        ("uptime_days", f"{report.uptime.total_seconds() / 86400.0:.2f}"),
+        ("cycles_completed", str(report.cycles_completed)),
+        ("episodes_total", str(report.episodes_total)),
+        ("episodes_success", str(report.episodes_success)),
+        ("episodes_failed", str(report.episodes_failed)),
+        ("self_directed_tasks_completed", str(report.self_directed_tasks_completed)),
+        ("suggestion_tasks_completed", str(report.suggestion_tasks_completed)),
+        ("loras_trained", str(report.loras_trained)),
+        ("loras_merged", str(report.loras_merged)),
+        ("current_base_generation", str(report.current_base_generation)),
+        ("patch_success_rate", f"{report.patch_success_rate:.3f}"),
+        (
+            "patch_success_rate_trend",
+            "n/a" if report.patch_success_rate_trend is None
+            else f"{report.patch_success_rate_trend:+.3f}",
+        ),
+        (
+            "coverage_percent",
+            "n/a" if report.coverage_percent is None
+            else f"{report.coverage_percent:.2f}",
+        ),
+        (
+            "coverage_trend",
+            "n/a" if report.coverage_trend is None
+            else f"{report.coverage_trend:+.3f}",
+        ),
+        (
+            "watchdog_flags",
+            ", ".join(report.watchdog_flags) if report.watchdog_flags else "(none)",
+        ),
+    ]
+    width = max(len(k) for k, _ in rows)
+    for key, val in rows:
+        print(f"{key.ljust(width)}  {val}")
+
+
+def cmd_autonomy_accept(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    report = generate_report(
+        runtime_dir=config.paths.runtime_dir,
+        traces_dir=config.paths.traces_dir,
+        models_dir=config.paths.models_dir,
+    )
+    # Use the first workspace's path as the repo to inspect for SC6.
+    # Multi-workspace acceptance is out of scope; soak runs against a
+    # single branch.
+    first_workspace = next(iter(config.workspaces.values()))
+    verdict = validate_acceptance(
+        report,
+        soak_branch=args.soak_branch,
+        workspace_root=Path(first_workspace.path),
+    )
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        render_acceptance_markdown(
+            verdict, report=report, soak_branch=args.soak_branch
+        ),
+        encoding="utf-8",
+    )
+    print(json.dumps(verdict.to_dict(), indent=2))
+    return 0 if verdict.overall == "PASS" else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="homunculus")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -160,6 +279,33 @@ def main() -> int:
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--config", required=True)
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    preflight_parser = subparsers.add_parser("autonomy-preflight")
+    preflight_parser.add_argument("--config", required=True)
+    preflight_parser.add_argument("--json", action="store_true")
+    preflight_parser.set_defaults(func=cmd_autonomy_preflight)
+
+    report_parser = subparsers.add_parser("autonomy-report")
+    report_parser.add_argument("--config", required=True)
+    report_parser.add_argument("--json", action="store_true")
+    report_parser.add_argument(
+        "--since",
+        default=None,
+        help="Filter episodes to those at or after this time. "
+             "Accepts DAY-N (e.g. DAY-7) or an ISO-8601 timestamp.",
+    )
+    report_parser.set_defaults(func=cmd_autonomy_report)
+
+    accept_parser = subparsers.add_parser("autonomy-accept")
+    accept_parser.add_argument("--config", required=True)
+    accept_parser.add_argument(
+        "--soak-log",
+        default=None,
+        help="Path to soak-log directory (reserved; report is regenerated live).",
+    )
+    accept_parser.add_argument("--output", required=True)
+    accept_parser.add_argument("--soak-branch", required=True)
+    accept_parser.set_defaults(func=cmd_autonomy_accept)
 
     args = parser.parse_args()
     return args.func(args)
