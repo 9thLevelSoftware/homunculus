@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import HomunculusConfig
-from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, IntrospectionResult, PreferencePair, SFTSample, TaskQueueEntry, utc_now
+from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, IntrospectionResult, LineageRecord, MergeManifest, PreferencePair, SFTSample, TaskQueueEntry, utc_now
 
 
 class ArtifactStore:
@@ -203,6 +203,78 @@ class ArtifactStore:
         if mode is not None:
             results = [r for r in results if r.mode == mode]
         return results
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Merge Manifest Persistence
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def merges_path(self) -> Path:
+        return self.traces_dir / "merges.jsonl"
+
+    def append_merge(self, manifest: MergeManifest) -> None:
+        """Append a merge manifest to traces/merges.jsonl."""
+        self.append_jsonl(self.merges_path(), manifest.to_dict())
+
+    def load_merges(self) -> list[MergeManifest]:
+        """Load all merge manifests."""
+        return [MergeManifest.from_dict(item) for item in self.load_jsonl(self.merges_path())]
+
+    def get_merge(self, merge_id: str) -> MergeManifest | None:
+        """Get a specific merge manifest by ID."""
+        for merge in self.load_merges():
+            if merge.merge_id == merge_id:
+                return merge
+        return None
+
+    def update_merge(self, manifest: MergeManifest) -> None:
+        """Update a merge manifest atomically (temp file + os.replace).
+
+        Follows the same atomic update pattern as update_queue_entry().
+        """
+        import os
+        import tempfile
+
+        merges = self.load_merges()
+        merges = [m if m.merge_id != manifest.merge_id else manifest for m in merges]
+
+        path = self.merges_path()
+        # Write to temp file first, then atomic replace
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for m in merges:
+                    handle.write(json.dumps(m.to_dict(), ensure_ascii=True) + "\n")
+            os.replace(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Lineage Record Persistence
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def lineage_path(self) -> Path:
+        return self.traces_dir / "lineage.jsonl"
+
+    def append_lineage(self, record: LineageRecord) -> None:
+        """Append a lineage record to traces/lineage.jsonl."""
+        self.append_jsonl(self.lineage_path(), record.to_dict())
+
+    def load_lineage(self) -> list[LineageRecord]:
+        """Load all lineage records."""
+        return [LineageRecord.from_dict(item) for item in self.load_jsonl(self.lineage_path())]
+
+    def get_lineage_record(self, record_id: str) -> LineageRecord | None:
+        """Get a specific lineage record by ID."""
+        for record in self.load_lineage():
+            if record.record_id == record_id:
+                return record
+        return None
+
+    def get_lineage_by_generation(self, generation: int) -> list[LineageRecord]:
+        """Get all lineage records for a specific generation."""
+        return [r for r in self.load_lineage() if r.generation == generation]
 
     # ─────────────────────────────────────────────────────────────────────────
     # Task Queue Persistence

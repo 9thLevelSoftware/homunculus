@@ -286,6 +286,52 @@ class DatasetSnapshot:
 
 
 @dataclass
+class MergeManifest:
+    """Record of a LoRA merge operation."""
+
+    merge_id: str
+    source_loras: list[str]  # candidate_ids of merged LoRAs
+    target_base: str  # model_id of the new base
+    merge_method: str  # "linear" | "ties" | "dare"
+    merge_params: dict[str, Any] = field(default_factory=dict)
+    status: str = "pending"  # "pending" | "merging" | "validating" | "complete" | "failed"
+    created_at: str = field(default_factory=utc_now)
+    completed_at: str | None = None
+    output_path: str | None = None
+    validation_results: dict[str, Any] = field(default_factory=dict)
+    error_message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MergeManifest":
+        return cls(**payload)
+
+
+@dataclass
+class LineageRecord:
+    """A node in the model lineage graph."""
+
+    record_id: str  # Usually matches candidate_id or merge_id
+    record_type: str  # "base" | "lora" | "merged"
+    model_id: str  # The model identifier
+    parent_ids: list[str] = field(default_factory=list)  # Parent record_ids
+    episode_ids: list[str] = field(default_factory=list)  # Training episodes (for LoRAs)
+    merge_id: str | None = None  # If this resulted from a merge
+    generation: int = 0  # 0 for base, increments with each merge
+    created_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "LineageRecord":
+        return cls(**payload)
+
+
+@dataclass
 class IntrospectionResult:
     """Result from running an introspection mode."""
 

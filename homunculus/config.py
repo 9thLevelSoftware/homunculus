@@ -111,6 +111,19 @@ class IntrospectionSettings:
 
 
 @dataclass
+class EvolutionSettings:
+    """Settings for weight evolution (LoRA merging)."""
+
+    enabled: bool = True
+    merge_after_loras: int = 3  # Merge after N promoted LoRAs
+    max_merge_attempts: int = 3  # Generate introspection task after N failures
+    validation_timeout_seconds: int = 300
+    coherence_prompt: str = "Explain what you are and what you do."
+    coherence_min_tokens: int = 50
+    merge_backend: str = "auto"  # "auto" | "mergekit" | "mlx"
+
+
+@dataclass
 class VerificationCommand:
     name: str
     command: str
@@ -147,6 +160,7 @@ class HomunculusConfig:
     source_path: Path
     daemon: DaemonSettings = field(default_factory=DaemonSettings)
     introspection: IntrospectionSettings = field(default_factory=IntrospectionSettings)
+    evolution: EvolutionSettings = field(default_factory=EvolutionSettings)
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -233,6 +247,18 @@ def load_config(path: str | Path) -> HomunculusConfig:
         critique_enabled=introspection_data.get("critique_enabled", True),
     )
 
+    # Parse [evolution] with defaults if section missing
+    evolution_raw = raw.get("evolution", {})
+    evolution = EvolutionSettings(
+        enabled=evolution_raw.get("enabled", True),
+        merge_after_loras=evolution_raw.get("merge_after_loras", 3),
+        max_merge_attempts=evolution_raw.get("max_merge_attempts", 3),
+        validation_timeout_seconds=evolution_raw.get("validation_timeout_seconds", 300),
+        coherence_prompt=evolution_raw.get("coherence_prompt", "Explain what you are and what you do."),
+        coherence_min_tokens=evolution_raw.get("coherence_min_tokens", 50),
+        merge_backend=evolution_raw.get("merge_backend", "auto"),
+    )
+
     return HomunculusConfig(
         teacher=TeacherSettings(**raw["teacher"]),
         student=StudentSettings(**raw["student"]),
@@ -250,4 +276,5 @@ def load_config(path: str | Path) -> HomunculusConfig:
         source_path=config_path,
         daemon=DaemonSettings(**raw.get("daemon", {})),
         introspection=introspection,
+        evolution=evolution,
     )
