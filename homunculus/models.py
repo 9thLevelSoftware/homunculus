@@ -92,6 +92,22 @@ class CommitResult:
 
 
 @dataclass
+class DaemonState:
+    started_at: str = field(default_factory=utc_now)
+    last_cycle_at: str | None = None
+    cycles_completed: int = 0
+    total_episodes: int = 0
+    episodes_this_cycle: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DaemonState":
+        return cls(**payload)
+
+
+@dataclass
 class GeneratedTask:
     task_id: str
     source: str  # "introspection" | "user" | "continuation"

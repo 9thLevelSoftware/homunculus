@@ -89,6 +89,15 @@ class GuardrailSettings:
 
 
 @dataclass
+class DaemonSettings:
+    enabled: bool = True
+    cycle_interval_minutes: int = 480
+    max_episodes_per_cycle: int = 5
+    suggestions_dir: str = "suggestions"
+    target_workspace: str = "self"
+
+
+@dataclass
 class VerificationCommand:
     name: str
     command: str
@@ -123,6 +132,7 @@ class HomunculusConfig:
     workspaces: dict[str, WorkspaceSettings]
     canary_commands: list[CanaryCommand]
     source_path: Path
+    daemon: DaemonSettings = field(default_factory=DaemonSettings)
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -193,4 +203,5 @@ def load_config(path: str | Path) -> HomunculusConfig:
         workspaces=workspaces,
         canary_commands=canary_commands,
         source_path=config_path,
+        daemon=DaemonSettings(**raw.get("daemon", {})),
     )

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import HomunculusConfig, load_config
-from .models import GeneratedTask
+from .models import DaemonState, GeneratedTask
 from .suggestions import SuggestionReader
 
 
@@ -19,7 +22,7 @@ class DaemonCycleResult:
 
 
 class Daemon:
-    """Basic daemon that reads tasks and executes episodes."""
+    """Daemon that reads tasks, executes episodes, and manages state."""
 
     def __init__(
         self,
@@ -27,8 +30,67 @@ class Daemon:
         suggestions_dir: Path | None = None,
     ) -> None:
         self.config = config
-        self.suggestions_dir = suggestions_dir or (config.paths.root / "suggestions")
+        self.suggestions_dir = suggestions_dir or (config.paths.root / config.daemon.suggestions_dir)
         self.suggestion_reader = SuggestionReader(self.suggestions_dir)
+        self._shutdown_event = threading.Event()
+
+    @property
+    def state_path(self) -> Path:
+        return self.config.paths.runtime_dir / "daemon_state.json"
+
+    @property
+    def lock_path(self) -> Path:
+        return self.config.paths.runtime_dir / "daemon.pid"
+
+    def load_state(self) -> DaemonState:
+        """Load daemon state from disk, or return fresh state if missing/corrupt."""
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text(encoding="utf-8"))
+                return DaemonState.from_dict(data)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+        return DaemonState()
+
+    def save_state(self, state: DaemonState) -> None:
+        """Save state atomically using write-to-temp-then-rename."""
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.state_path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(state.to_dict(), indent=2),
+            encoding="utf-8"
+        )
+        # os.replace is atomic on both Unix and Windows
+        os.replace(tmp_path, self.state_path)
+
+    def acquire_lock(self) -> bool:
+        """Acquire exclusive daemon lock. Returns False if another instance is running."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.lock_path.exists():
+            try:
+                pid = int(self.lock_path.read_text(encoding="utf-8").strip())
+                # Check if process is still running (cross-platform)
+                try:
+                    os.kill(pid, 0)  # Signal 0 checks if process exists
+                    return False  # Process exists, lock is held
+                except OSError:
+                    pass  # Process doesn't exist, stale lock
+            except (ValueError, OSError):
+                pass
+        self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
+        return True
+
+    def release_lock(self) -> None:
+        """Release daemon lock."""
+        if self.lock_path.exists():
+            try:
+                self.lock_path.unlink()
+            except OSError:
+                pass
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_event.is_set()
 
     def get_pending_tasks(self) -> list[GeneratedTask]:
         """Get all pending tasks from suggestion directory."""
