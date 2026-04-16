@@ -1,12 +1,16 @@
 [teacher]
+# Local Ollama endpoint. Set up via scripts/phase5/setup.ps1
+# (pulls qwen2.5-coder:14b-instruct-q4_K_M and starts `ollama serve`).
+# api_key_env must be set to any non-empty value; setup.ps1 exports
+# OPENAI_API_KEY=ollama-local at User scope.
 provider = "openai-compatible"
-model = "gpt-5-mini"
-base_url = "https://api.openai.com/v1"
+model = "qwen2.5-coder:14b-instruct-q4_K_M"
+base_url = "http://127.0.0.1:11434/v1"
 endpoint = "/chat/completions"
 api_key_env = "OPENAI_API_KEY"
 temperature = 0.0
 max_tokens = 4000
-timeout_seconds = 60
+timeout_seconds = 180
 
 [student]
 model_id = "Qwen/Qwen2.5-Coder-3B-Instruct"

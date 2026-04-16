@@ -1,0 +1,42 @@
+[
+  {
+    "task_id": "boot-01-reporter-docstring",
+    "prompt": "Add a concise module-level docstring (3-5 lines) to homunculus/autonomy/reporter.py explaining what generate_report does and which artifacts it reads. Place it at the top of the file immediately after the `from __future__ import annotations` line. Do not modify any behavior, imports, or function signatures."
+  },
+  {
+    "task_id": "boot-02-watchdog-comment",
+    "prompt": "In homunculus/autonomy/watchdog.py, add a one-sentence comment immediately above the `def load(` method of the WatchdogSnapshot class explaining that it recovers gracefully from corrupt JSON by returning a fresh snapshot. Do not modify the method body or any other code."
+  },
+  {
+    "task_id": "boot-03-models-docstring",
+    "prompt": "Add a one-line module-level docstring to homunculus/autonomy/models.py describing the module as defining the Phase 5 autonomy data contracts. Place it at the top immediately after the `from __future__ import annotations` line. Do not change any dataclass."
+  },
+  {
+    "task_id": "boot-04-init-all-sort",
+    "prompt": "In homunculus/autonomy/__init__.py, sort the entries of the `__all__` tuple alphabetically (case-insensitive). Preserve all existing imports and exported names exactly. Do not add or remove any name."
+  },
+  {
+    "task_id": "boot-05-preflight-header",
+    "prompt": "Add a module-level docstring (2-4 lines) to homunculus/autonomy/preflight.py describing it as the Phase 5 preflight gate runner. Place it at the top of the file after the future-import line. Do not change any gate implementation."
+  },
+  {
+    "task_id": "boot-06-acceptance-header",
+    "prompt": "Add a module-level docstring (2-4 lines) to homunculus/autonomy/acceptance.py describing it as evaluating the six success criteria from the Phase 5 spec. Place it at the top of the file after the future-import line. Do not change any criterion."
+  },
+  {
+    "task_id": "boot-07-cli-comment",
+    "prompt": "In homunculus/cli.py, find the block that registers the three autonomy subcommands (autonomy-preflight, autonomy-report, autonomy-accept) and add a single one-line comment immediately above that block: `# --- Phase 5 autonomy commands ---`. Do not modify any subparser argument or handler wiring."
+  },
+  {
+    "task_id": "boot-08-codebase-note",
+    "prompt": "In .planning/CODEBASE.md, in the Overview table or nearest heading, add a one-line note under the Risk Areas section (creating one if missing) listing `homunculus/autonomy/watchdog.py` as a Phase 5 component requiring atomic persistence. Do not remove or reorder existing entries."
+  },
+  {
+    "task_id": "boot-09-suggestions-stub",
+    "prompt": "Create a new file at suggestions/phase5-soak-observation.md with 8-12 lines describing the intent of running daily autonomy-report snapshots during the Phase 5 soak and the four abort conditions (cycle_failure:3+, disk >90%, test regression, git corruption). Keep it concise. This file is documentation-only."
+  },
+  {
+    "task_id": "boot-10-daemon-comment",
+    "prompt": "In homunculus/daemon.py, find the `_finalize_cycle` method and add a one-line comment immediately above it: `# Watchdog tick — runs once per cycle to surface consecutive failure signals`. Do not modify the method implementation."
+  }
+]
