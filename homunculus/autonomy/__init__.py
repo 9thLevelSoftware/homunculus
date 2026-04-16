@@ -2,7 +2,8 @@
 
 Public surface: dataclasses from :mod:`homunculus.autonomy.models`,
 plus :func:`generate_report`, :class:`Watchdog`,
-:func:`run_preflight`, and :func:`validate_acceptance`.
+:func:`run_preflight`, :func:`run_precheck`, and
+:func:`validate_acceptance`.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from .models import (
     PreflightResult,
     WatchdogSnapshot,
 )
+from .precheck import ThroughputPrecheck, run_precheck
 from .preflight import run_preflight
 from .reporter import generate_report
 from .watchdog import Watchdog
@@ -25,9 +27,11 @@ __all__ = [
     "CriterionResult",
     "GateResult",
     "PreflightResult",
-    "WatchdogSnapshot",
+    "ThroughputPrecheck",
     "Watchdog",
+    "WatchdogSnapshot",
     "generate_report",
+    "run_precheck",
     "run_preflight",
     "validate_acceptance",
 ]

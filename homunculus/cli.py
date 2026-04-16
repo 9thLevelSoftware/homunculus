@@ -11,6 +11,7 @@ import shutil
 
 from .autonomy import generate_report
 from .autonomy.acceptance import render_acceptance_markdown, validate_acceptance
+from .autonomy.precheck import format_precheck_table, run_precheck
 from .autonomy.preflight import format_preflight_table, run_preflight
 from .config import load_config
 from .models import EvaluationMetrics, TaskRequest
@@ -146,6 +147,22 @@ def _parse_since(value: str | None) -> datetime | None:
     return parsed
 
 
+def cmd_autonomy_precheck(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    result = run_precheck(
+        config,
+        lookback_days=args.lookback_days,
+        soak_days=args.soak_days,
+        threshold_min=args.threshold_min,
+        safety_margin=args.safety_margin,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(format_precheck_table(result))
+    return 0 if result.verdict == "PASS" else 2
+
+
 def cmd_autonomy_preflight(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     result = run_preflight(config)
@@ -279,6 +296,30 @@ def main() -> int:
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--config", required=True)
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    precheck_parser = subparsers.add_parser(
+        "autonomy-precheck",
+        help="SOAK-PROTOCOL §2.2 throughput gate — projects LoRA merges over soak window.",
+    )
+    precheck_parser.add_argument("--config", required=True)
+    precheck_parser.add_argument("--json", action="store_true")
+    precheck_parser.add_argument(
+        "--lookback-days", type=int, default=14,
+        help="Historical window for episode rate calculation (default: 14).",
+    )
+    precheck_parser.add_argument(
+        "--soak-days", type=int, default=7,
+        help="Intended soak duration in days (default: 7).",
+    )
+    precheck_parser.add_argument(
+        "--threshold-min", type=float, default=1.0,
+        help="Minimum projected merges for PASS verdict (default: 1.0).",
+    )
+    precheck_parser.add_argument(
+        "--safety-margin", type=float, default=1.5,
+        help="Projection floor for 'OK' margin annotation (default: 1.5).",
+    )
+    precheck_parser.set_defaults(func=cmd_autonomy_precheck)
 
     preflight_parser = subparsers.add_parser("autonomy-preflight")
     preflight_parser.add_argument("--config", required=True)

@@ -20,9 +20,11 @@ from homunculus.autonomy import (
     CriterionResult,
     GateResult,
     PreflightResult,
+    ThroughputPrecheck,
     Watchdog,
     WatchdogSnapshot,
     generate_report,
+    run_precheck,
 )
 from homunculus.autonomy.acceptance import (
     METRIC_TOLERANCE,
@@ -794,6 +796,205 @@ class DaemonWatchdogIntegrationTests(unittest.TestCase):
                 any(f.startswith("cycle_failure:") for f in report.watchdog_flags),
                 f"Expected cycle_failure flag in {report.watchdog_flags}",
             )
+
+
+# ---------------------------------------------------------------------------
+# Throughput precheck tests
+# ---------------------------------------------------------------------------
+
+
+def _write_precheck_episodes(
+    traces: Path,
+    count: int,
+    *,
+    successes: int,
+    minutes_back_start: int,
+) -> None:
+    """Write ``count`` episodes with ``timestamp`` field set to staggered
+    UTC ISO-8601 timestamps going backward from ``minutes_back_start``
+    minutes ago.
+    """
+    traces.mkdir(parents=True, exist_ok=True)
+    path = traces / "episodes.jsonl"
+    now = datetime.now(timezone.utc)
+    lines: list[str] = []
+    for i in range(count):
+        ts = now - timedelta(minutes=minutes_back_start + i)
+        outcome = "accepted" if i < successes else "reverted"
+        record = {
+            "episode_id": f"ep-{i:04d}",
+            "task_id": f"task-{i:04d}",
+            "outcome": outcome,
+            "timestamp": ts.isoformat(),
+        }
+        lines.append(json.dumps(record))
+    with path.open("a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+
+
+def _precheck_settings(temp_dir: Path) -> tuple[Path, "HomunculusConfig"]:  # type: ignore[name-defined]
+    """Build a minimal config fixture suitable for run_precheck."""
+    source = Path(
+        "C:/Users/dasbl/Documents/homunculus/homunculus.example.toml"
+    )
+    content = source.read_text(encoding="utf-8").replace(
+        'root = "."', f'root = "{temp_dir.as_posix()}"', 1
+    )
+    target = temp_dir / "homunculus.toml"
+    target.write_text(content, encoding="utf-8")
+    return target, load_config(target)
+
+
+class ThroughputPrecheckTests(unittest.TestCase):
+    """Tests for :func:`homunculus.autonomy.precheck.run_precheck`."""
+
+    def test_blocks_with_empty_episodes(self) -> None:
+        """No episode history → 0 projection → BLOCK."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            (temp / "traces").mkdir()
+            result = run_precheck(settings)
+            self.assertEqual(result.verdict, "BLOCK")
+            self.assertEqual(result.episodes_window, 0)
+            self.assertEqual(result.projected_loras_merged_soak, 0.0)
+            self.assertEqual(result.margin_note, "below_safety_margin")
+
+    def test_blocks_when_all_episodes_outside_lookback(self) -> None:
+        """Episodes older than lookback window are ignored."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            _write_precheck_episodes(
+                temp / "traces", 100,
+                successes=100,
+                minutes_back_start=60 * 24 * 30,  # 30 days back
+            )
+            result = run_precheck(settings, lookback_days=14)
+            self.assertEqual(result.episodes_window, 0)
+            self.assertEqual(result.verdict, "BLOCK")
+
+    def test_passes_with_sufficient_throughput(self) -> None:
+        """High episode rate + low thresholds → PASS + OK margin."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            # 140 successful episodes in 14-day window = 10/day
+            # with min_samples=10, min_loras=2:
+            # successful_soak = 10 * 7 * 1.0 = 70
+            # loras_trained = 70 / 10 = 7
+            # loras_merged = floor(7) / 2 = 3.5 → PASS (>=1.5 margin)
+            _write_precheck_episodes(
+                temp / "traces", 140,
+                successes=140,
+                minutes_back_start=60,  # all within last 24h of window
+            )
+            # Override thresholds: use lowered (10, 2) to reflect production
+            # change made for Phase 5 feasibility.
+            settings = load_config(temp / "homunculus.toml")
+            settings.evolution.auto_train_after_samples = 10
+            settings.evolution.auto_merge_after_loras = 2
+            result = run_precheck(settings)
+            self.assertEqual(result.verdict, "PASS")
+            self.assertEqual(result.margin_note, "OK")
+            self.assertGreaterEqual(result.projected_loras_merged_soak, 1.5)
+
+    def test_pass_but_below_safety_margin(self) -> None:
+        """Projection in [threshold_min, safety_margin) → PASS + below_safety_margin."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            # Target: projection in [1.0, 1.5). With min_samples=10,
+            # min_loras=2: loras_merged = floor(success_soak/10)/2 = 1 when
+            # success_soak ∈ [20, 30). Achieve by 35 successes in 14 days:
+            # rate=2.5, soak_success=17.5 → not quite enough. Try 50 in 14d:
+            # rate=3.57, soak_success=25 → floor(2.5)/2=1.0 exactly.
+            _write_precheck_episodes(
+                temp / "traces", 50,
+                successes=50,
+                minutes_back_start=60,
+            )
+            settings = load_config(temp / "homunculus.toml")
+            settings.evolution.auto_train_after_samples = 10
+            settings.evolution.auto_merge_after_loras = 2
+            result = run_precheck(settings)
+            self.assertEqual(result.verdict, "PASS")
+            self.assertGreaterEqual(result.projected_loras_merged_soak, 1.0)
+            self.assertLess(result.projected_loras_merged_soak, 1.5)
+            self.assertEqual(result.margin_note, "below_safety_margin")
+
+    def test_honours_custom_thresholds(self) -> None:
+        """Callers can raise threshold_min to force BLOCK."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            _write_precheck_episodes(
+                temp / "traces", 140,
+                successes=140,
+                minutes_back_start=60,
+            )
+            settings = load_config(temp / "homunculus.toml")
+            settings.evolution.auto_train_after_samples = 10
+            settings.evolution.auto_merge_after_loras = 2
+            # Raise bar to 10 merges — same data now fails.
+            result = run_precheck(settings, threshold_min=10.0)
+            self.assertEqual(result.verdict, "BLOCK")
+
+    def test_skips_malformed_lines(self) -> None:
+        """Corrupt JSON lines are ignored, not fatal."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            traces = temp / "traces"
+            _write_precheck_episodes(
+                traces, 10, successes=10, minutes_back_start=60
+            )
+            # Append garbage
+            with (traces / "episodes.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write("not json\n{\"oops\"\nanother garbage\n")
+            result = run_precheck(settings)
+            # Should see only the 10 well-formed records
+            self.assertEqual(result.episodes_window, 10)
+
+    def test_ignores_records_missing_timestamp(self) -> None:
+        """Records without the ``timestamp`` field fall out of the window."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            _, settings = _precheck_settings(temp)
+            traces = temp / "traces"
+            traces.mkdir()
+            # Write a record missing the timestamp field
+            (traces / "episodes.jsonl").write_text(
+                json.dumps({
+                    "episode_id": "ep-no-ts",
+                    "outcome": "accepted",
+                    # no timestamp
+                }) + "\n",
+                encoding="utf-8",
+            )
+            result = run_precheck(settings)
+            self.assertEqual(result.episodes_window, 0)
+            self.assertEqual(result.verdict, "BLOCK")
+
+    def test_cli_exit_codes(self) -> None:
+        """CLI returns 0 on PASS, 2 on BLOCK — matches SOAK-PROTOCOL §2.2
+        contract used by scripts/phase5/precheck.ps1."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp = Path(temp_root)
+            config_path, _ = _precheck_settings(temp)
+            # BLOCK case: empty episodes
+            (temp / "traces").mkdir()
+            cli = _REAL_SUBPROCESS_RUN(
+                [shutil.which("python") or "python",
+                 "-m", "homunculus.cli", "autonomy-precheck",
+                 "--config", str(config_path), "--json"],
+                cwd="C:/Users/dasbl/Documents/homunculus",
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(cli.returncode, 2, cli.stderr)
+            payload = json.loads(cli.stdout)
+            self.assertEqual(payload["verdict"], "BLOCK")
 
 
 if __name__ == "__main__":
