@@ -98,6 +98,19 @@ class DaemonSettings:
 
 
 @dataclass
+class IntrospectionSettings:
+    """Settings for introspection system."""
+
+    enabled: bool = True
+    metrics_interval: int = 1  # Run every N cycles
+    critique_interval: int = 3
+    coverage_interval: int = 5
+    comparative_interval: int = 3
+    window_size: int = 50  # Episodes to analyze
+    critique_enabled: bool = True  # Can disable to save API costs
+
+
+@dataclass
 class VerificationCommand:
     name: str
     command: str
@@ -133,6 +146,7 @@ class HomunculusConfig:
     canary_commands: list[CanaryCommand]
     source_path: Path
     daemon: DaemonSettings = field(default_factory=DaemonSettings)
+    introspection: IntrospectionSettings = field(default_factory=IntrospectionSettings)
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -188,6 +202,18 @@ def load_config(path: str | Path) -> HomunculusConfig:
         for item in raw.get("canary", {}).get("commands", [])
     ]
 
+    # Parse [introspection] with defaults if section missing
+    introspection_data = raw.get("introspection", {})
+    introspection = IntrospectionSettings(
+        enabled=introspection_data.get("enabled", True),
+        metrics_interval=introspection_data.get("metrics_interval", 1),
+        critique_interval=introspection_data.get("critique_interval", 3),
+        coverage_interval=introspection_data.get("coverage_interval", 5),
+        comparative_interval=introspection_data.get("comparative_interval", 3),
+        window_size=introspection_data.get("window_size", 50),
+        critique_enabled=introspection_data.get("critique_enabled", True),
+    )
+
     return HomunculusConfig(
         teacher=TeacherSettings(**raw["teacher"]),
         student=StudentSettings(**raw["student"]),
@@ -204,4 +230,5 @@ def load_config(path: str | Path) -> HomunculusConfig:
         canary_commands=canary_commands,
         source_path=config_path,
         daemon=DaemonSettings(**raw.get("daemon", {})),
+        introspection=introspection,
     )

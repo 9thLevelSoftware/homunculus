@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import HomunculusConfig
-from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, PreferencePair, SFTSample
+from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, IntrospectionResult, PreferencePair, SFTSample
 
 
 class ArtifactStore:
@@ -34,6 +34,7 @@ class ArtifactStore:
         for path in [
             self.traces_dir / "events.jsonl",
             self.traces_dir / "episodes.jsonl",
+            self.traces_dir / "introspection.jsonl",
             self.datasets_dir / "sft" / "train.jsonl",
             self.datasets_dir / "sft" / "valid.jsonl",
             self.datasets_dir / "sft" / "test.jsonl",
@@ -181,3 +182,24 @@ class ArtifactStore:
         for item in payloads:
             digest.update(json.dumps(item, sort_keys=True).encode("utf-8"))
         return digest.hexdigest()
+
+    def append_introspection_result(self, result: IntrospectionResult) -> None:
+        """Append an introspection result to traces/introspection.jsonl."""
+        self.append_jsonl(self.traces_dir / "introspection.jsonl", result.to_dict())
+
+    def load_introspection_results(self, mode: str | None = None) -> list[IntrospectionResult]:
+        """Load introspection results, optionally filtered by mode.
+
+        Args:
+            mode: If provided, only return results for this mode (e.g., 'metrics', 'critique')
+
+        Returns:
+            List of IntrospectionResult objects
+        """
+        results = [
+            IntrospectionResult.from_dict(item)
+            for item in self.load_jsonl(self.traces_dir / "introspection.jsonl")
+        ]
+        if mode is not None:
+            results = [r for r in results if r.mode == mode]
+        return results

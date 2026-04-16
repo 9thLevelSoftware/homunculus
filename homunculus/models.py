@@ -283,3 +283,22 @@ class DatasetSnapshot:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DatasetSnapshot":
         return cls(**payload)
+
+
+@dataclass
+class IntrospectionResult:
+    """Result from running an introspection mode."""
+
+    mode: str  # "metrics" | "critique" | "coverage" | "comparative"
+    timestamp: str
+    findings: list[dict[str, Any]]  # Mode-specific findings
+    summary: str  # Human-readable summary
+    metrics: dict[str, float]  # Numeric metrics for trending
+    recommendations: list[str]  # Actionable suggestions
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "IntrospectionResult":
+        return cls(**payload)

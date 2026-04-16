@@ -61,6 +61,15 @@ cycle_interval_minutes = 480
 max_episodes_per_cycle = 5
 suggestions_dir = "suggestions"
 
+[introspection]
+enabled = true
+metrics_interval = 1      # Run metrics every cycle
+critique_interval = 3     # Run critique every 3 cycles
+coverage_interval = 5     # Run coverage every 5 cycles
+comparative_interval = 3  # Run comparative every 3 cycles
+window_size = 50          # Number of recent episodes to analyze
+critique_enabled = true   # Set false to save API costs
+
 [evolution]
 auto_promote = true
 auto_apply = true
