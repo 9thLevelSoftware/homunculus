@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import threading
@@ -12,9 +13,14 @@ from typing import TYPE_CHECKING
 from .config import HomunculusConfig, load_config
 from .models import DaemonState, GeneratedTask, utc_now
 from .suggestions import SuggestionReader
+from .task_generator import TaskGenerator, TaskPrioritizer
 
 if TYPE_CHECKING:
+    from .models import IntrospectionResult
     from .orchestrator.loop import EpisodeOrchestrator
+    from .storage import ArtifactStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,12 +40,16 @@ class Daemon:
         config: HomunculusConfig,
         orchestrator: "EpisodeOrchestrator | None" = None,
         suggestions_dir: Path | None = None,
+        store: "ArtifactStore | None" = None,
     ) -> None:
         self.config = config
         self.orchestrator = orchestrator
         self.suggestions_dir = suggestions_dir or (config.paths.root / config.daemon.suggestions_dir)
         self.suggestion_reader = SuggestionReader(self.suggestions_dir)
         self._shutdown_event = threading.Event()
+        self.store = store
+        self.task_generator = TaskGenerator(store) if store else None
+        self.prioritizer = TaskPrioritizer()
 
     @property
     def state_path(self) -> Path:
@@ -122,9 +132,61 @@ class Daemon:
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, handle_shutdown)
 
+    def _get_recent_introspection(self) -> list["IntrospectionResult"]:
+        """Load recent introspection results for task generation.
+
+        Returns up to 5 most recent results for use in task generation
+        and resonance scoring.
+
+        Returns:
+            List of recent IntrospectionResult objects, newest first
+        """
+        if self.store is None:
+            return []
+        try:
+            return self.store.load_introspection_results()[-5:]
+        except Exception as e:
+            logger.warning("Failed to load introspection results: %s", e)
+            return []
+
     def get_pending_tasks(self) -> list[GeneratedTask]:
-        """Get all pending tasks from suggestion directory."""
-        return self.suggestion_reader.read_pending()
+        """Get all pending tasks from introspection and suggestions.
+
+        Combines tasks from three sources:
+        1. Generated from introspection insights (if store available)
+        2. User suggestions with resonance scoring (if introspection available)
+        3. Plain user suggestions (fallback)
+
+        All tasks are then ranked by the prioritizer using alignment,
+        complexity, and freshness factors.
+
+        Returns:
+            Prioritized list of GeneratedTask objects
+        """
+        introspection_results = self._get_recent_introspection()
+
+        # Generate tasks from introspection if we have a generator and results
+        generated: list[GeneratedTask] = []
+        if self.task_generator and introspection_results:
+            try:
+                generated = self.task_generator.generate_from_introspection(
+                    introspection_results,
+                    max_tasks=3,
+                )
+            except Exception as e:
+                logger.warning("Failed to generate introspection tasks: %s", e)
+
+        # Read suggestions with resonance boost if we have introspection context
+        if introspection_results:
+            suggestions = self.suggestion_reader.read_pending_with_resonance(
+                introspection_results
+            )
+        else:
+            suggestions = self.suggestion_reader.read_pending()
+
+        # Combine and prioritize all tasks
+        all_tasks = generated + suggestions
+        return self.prioritizer.prioritize(all_tasks, introspection_results)
 
     def run_once(self) -> DaemonCycleResult:
         """Execute one daemon cycle: get tasks, run episodes, return."""
@@ -230,11 +292,12 @@ def main() -> int:
 
     # Build orchestrator for real execution (unless dry-run)
     orchestrator = None
+    store = None
     if not args.dry_run:
         from .runtime import build_runtime
-        _, _, _, _, orchestrator, _, _ = build_runtime(args.config)
+        _, store, _, _, orchestrator, _, _ = build_runtime(args.config)
 
-    daemon = Daemon(config, orchestrator=orchestrator, suggestions_dir=suggestions_dir)
+    daemon = Daemon(config, orchestrator=orchestrator, suggestions_dir=suggestions_dir, store=store)
 
     # Check for existing daemon instance
     if not daemon.acquire_lock():

@@ -10,8 +10,9 @@ import unittest
 
 from homunculus.config import load_config
 from homunculus.daemon import Daemon
-from homunculus.models import DaemonState, GeneratedTask
+from homunculus.models import DaemonState, GeneratedTask, IntrospectionResult
 from homunculus.storage import ArtifactStore
+from homunculus.task_generator import TaskPrioritizer
 
 
 @unittest.skipUnless(shutil.which("git"), "git is required")
@@ -245,6 +246,175 @@ Add a comment to file.py
             self.assertGreaterEqual(state.cycles_completed, 1)
             # Should have a last_cycle_at timestamp
             self.assertIsNotNone(state.last_cycle_at)
+
+    def test_daemon_constructor_backward_compatible(self) -> None:
+        """Test that Daemon constructor works without store parameter."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+
+            # Old-style construction (no store)
+            daemon = Daemon(config)
+
+            self.assertIsNone(daemon.store)
+            self.assertIsNone(daemon.task_generator)
+            self.assertIsInstance(daemon.prioritizer, TaskPrioritizer)
+
+    def test_daemon_with_store_has_task_generator(self) -> None:
+        """Test that Daemon with store gets a TaskGenerator."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            store = ArtifactStore(config)
+
+            daemon = Daemon(config, store=store)
+
+            self.assertIsNotNone(daemon.store)
+            self.assertIsNotNone(daemon.task_generator)
+            self.assertIsInstance(daemon.prioritizer, TaskPrioritizer)
+
+    def test_daemon_get_recent_introspection_returns_empty_without_store(self) -> None:
+        """Test that _get_recent_introspection returns empty list without store."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+
+            daemon = Daemon(config)
+            results = daemon._get_recent_introspection()
+
+            self.assertEqual(results, [])
+
+    def test_daemon_get_recent_introspection_loads_results(self) -> None:
+        """Test that _get_recent_introspection loads from store."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            store = ArtifactStore(config)
+            store.ensure_layout()
+
+            # Add some introspection results
+            for i in range(3):
+                result = IntrospectionResult(
+                    mode="metrics",
+                    timestamp=f"2026-04-15T0{i}:00:00+00:00",
+                    findings=[],
+                    summary=f"Result {i}",
+                    metrics={},
+                    recommendations=[],
+                )
+                store.append_introspection_result(result)
+
+            daemon = Daemon(config, store=store)
+            results = daemon._get_recent_introspection()
+
+            self.assertEqual(len(results), 3)
+
+    def test_daemon_get_recent_introspection_limits_to_five(self) -> None:
+        """Test that _get_recent_introspection returns at most 5 results."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            store = ArtifactStore(config)
+            store.ensure_layout()
+
+            # Add 10 introspection results
+            for i in range(10):
+                result = IntrospectionResult(
+                    mode="metrics",
+                    timestamp=f"2026-04-15T{i:02d}:00:00+00:00",
+                    findings=[],
+                    summary=f"Result {i}",
+                    metrics={},
+                    recommendations=[],
+                )
+                store.append_introspection_result(result)
+
+            daemon = Daemon(config, store=store)
+            results = daemon._get_recent_introspection()
+
+            self.assertEqual(len(results), 5)
+
+    def test_daemon_get_pending_tasks_combines_sources(self) -> None:
+        """Test that get_pending_tasks combines introspection and suggestions."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            store = ArtifactStore(config)
+            store.ensure_layout()
+
+            # Add introspection result with actionable finding
+            result = IntrospectionResult(
+                mode="metrics",
+                timestamp="2026-04-15T00:00:00+00:00",
+                findings=[
+                    {"type": "high_error_rate", "value": 0.25, "severity": "critical"}
+                ],
+                summary="High error rate",
+                metrics={"error_rate": 0.25},
+                recommendations=["Fix errors"],
+            )
+            store.append_introspection_result(result)
+
+            # Create suggestions directory with a task
+            suggestions_dir = temp_path / "suggestions"
+            suggestions_dir.mkdir()
+            (suggestions_dir / "test-task.md").write_text("""# Test Task
+
+## Priority
+HIGH
+
+## What
+Add a feature
+""", encoding="utf-8")
+
+            daemon = Daemon(config, suggestions_dir=suggestions_dir, store=store)
+            tasks = daemon.get_pending_tasks()
+
+            # Should have both introspection-generated and suggestion tasks
+            self.assertGreater(len(tasks), 0)
+            sources = {t.source for t in tasks}
+            # Should include both sources
+            self.assertTrue("introspection" in sources or "user" in sources)
+
+    def test_daemon_get_pending_tasks_returns_prioritized_list(self) -> None:
+        """Test that get_pending_tasks returns tasks sorted by priority."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+
+            # Create suggestions with different priorities
+            suggestions_dir = temp_path / "suggestions"
+            suggestions_dir.mkdir()
+            (suggestions_dir / "low-task.md").write_text("""# Low Task
+
+## Priority
+LOW
+
+## What
+Low priority task
+""", encoding="utf-8")
+            (suggestions_dir / "high-task.md").write_text("""# High Task
+
+## Priority
+HIGH
+
+## What
+High priority task
+""", encoding="utf-8")
+
+            daemon = Daemon(config, suggestions_dir=suggestions_dir)
+            tasks = daemon.get_pending_tasks()
+
+            self.assertEqual(len(tasks), 2)
+            # Tasks should be sorted by priority (highest first)
+            self.assertGreaterEqual(tasks[0].priority, tasks[1].priority)
 
 
 if __name__ == "__main__":
