@@ -1566,5 +1566,89 @@ class LineageMultiBaseTests(unittest.TestCase):
         self.assertIn("ep2", record.episode_ids)
 
 
+class MergeBaseConsistencyTests(unittest.TestCase):
+    """MergeManager.merge must reject LoRA stacks where base_model disagrees."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.tmp.name)
+
+        # Mirror MergeManagerTests config setup
+        self.config = MagicMock()
+        self.config.evolution.merge_backend = "auto"
+        self.config.evolution.auto_merge_after_loras = 3
+        self.config.evolution.validation_timeout_seconds = 300
+        self.config.paths.models_dir = self.temp_path / "models"
+        self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
+
+        self.store = MagicMock()
+        self.store.load_registry.return_value = {"candidates": [], "history": []}
+        self.store.load_merges.return_value = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_manager(self):
+        from homunculus.evolution.merge import MergeManager
+        return MergeManager(self.config, self.store)
+
+    def _make_lora(self, candidate_id: str, base_model: str) -> AdapterManifest:
+        return AdapterManifest(
+            model_id="model",
+            base_model=base_model,
+            adapter_path=str(self.temp_path / candidate_id),
+            dataset_snapshot=f"snap-{candidate_id}",
+            snapshot_path=None,
+            trainer="mlx-lm",
+            metrics={},
+            status="promoted",
+            created_at="2024-01-01",
+            candidate_id=candidate_id,
+        )
+
+    def test_mixed_base_loras_raise_value_error(self):
+        mgr = self._make_manager()
+        loras = [
+            self._make_lora("L1", "B1"),
+            self._make_lora("L2", "B2"),
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            mgr.merge(loras)
+        msg = str(ctx.exception).lower()
+        self.assertIn("base", msg)
+
+    def test_no_base_model_raises_value_error(self):
+        mgr = self._make_manager()
+        loras = [self._make_lora("L1", "")]
+        with self.assertRaises(ValueError) as ctx:
+            mgr.merge(loras)
+        self.assertIn("base", str(ctx.exception).lower())
+
+    def test_homogeneous_base_proceeds(self):
+        """Sanity: same-base LoRAs should NOT raise from this guard."""
+        from homunculus.evolution.merge import MergeResult
+
+        mgr = self._make_manager()
+        loras = [
+            self._make_lora("L1", "B1"),
+            self._make_lora("L2", "B1"),
+        ]
+        # Stub out the actual backend so we don't run a real subprocess
+        with patch.object(
+            mgr, "_merge_with_mergekit",
+            return_value=MergeResult(success=True, output_path="/out"),
+        ), patch.object(
+            mgr, "_merge_with_mlx",
+            return_value=MergeResult(success=True, output_path="/out"),
+        ):
+            try:
+                mgr.merge(loras)
+            except ValueError as e:
+                self.fail(f"Homogeneous base must NOT raise ValueError: {e}")
+            except Exception:
+                # Other exceptions (e.g., from store side-effects) are out of scope
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,10 +126,20 @@ class MergeManager:
 
         merge_id = f"merge-{uuid.uuid4().hex[:8]}"
 
+        bases = {lora.base_model for lora in loras if lora.base_model}
+        if len(bases) > 1:
+            raise ValueError(
+                f"All source LoRAs must share the same base model; "
+                f"got: {sorted(bases)}"
+            )
+        if not bases:
+            raise ValueError("No source LoRAs have a base_model set")
+        target_base = bases.pop()
+
         manifest = MergeManifest(
             merge_id=merge_id,
             source_loras=[lora.candidate_id for lora in loras if lora.candidate_id],
-            target_base=loras[0].base_model,  # All should share same base
+            target_base=target_base,
             merge_method=method,
             status="merging",
         )
