@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .autonomy import Watchdog
 from .config import HomunculusConfig, load_config
 from .models import DaemonState, GeneratedTask, TaskQueueEntry, utc_now
 from .suggestions import SuggestionReader
@@ -100,6 +101,14 @@ class Daemon:
             )
         else:
             self.introspection_scheduler = None
+
+        # Phase 5 watchdog — advisory failure-signal tracker. Persists to
+        # runtime/watchdog.json via atomic write; never stops the daemon.
+        # Constructed unconditionally so ``run_once``-only callers (tests,
+        # --once mode) exercise the same path as ``run_continuous``.
+        self._watchdog: Watchdog = Watchdog(
+            self.config.paths.runtime_dir / "watchdog.json"
+        )
 
     @property
     def state_path(self) -> Path:
@@ -613,6 +622,54 @@ class Daemon:
             else:
                 trainer.reset_merge_failure_count()
 
+    def _finalize_cycle(self, outcome: "DaemonCycleResult") -> None:
+        """Run end-of-cycle hooks that must see the cycle outcome.
+
+        Kept deliberately minimal: the watchdog is the only current
+        consumer. We mirror the current consecutive merge-failure count
+        (read-only aggregation — spec §5: watchdog does not mutate the
+        evolution counter) before persisting so the flag derivation
+        stays local. All operations fail-safe: any watchdog error is
+        logged and swallowed — a broken watchdog must never block the
+        cycle loop.
+        """
+        try:
+            self._watchdog.tick(outcome)
+            try:
+                self._watchdog.merge_failures(self._read_merge_failure_count())
+            except Exception as exc:  # noqa: BLE001 — advisory only
+                logger.warning(
+                    "Watchdog could not read merge-failure count: %s", exc,
+                )
+            self._watchdog.save()
+        except Exception as exc:  # noqa: BLE001 — advisory only
+            logger.warning("Watchdog tick failed: %s", exc)
+
+    def _read_merge_failure_count(self) -> int:
+        """Read the evolution layer's consecutive merge-failure count.
+
+        Returns 0 when evolution is disabled, the store is absent, or
+        the trainer declines to report (e.g., a MagicMock in tests).
+        We deliberately build a fresh trainer rather than caching one
+        so tests that replace ``store`` between cycles still see the
+        right counter.
+        """
+        if not self.config.evolution.enabled or self.store is None:
+            return 0
+        try:
+            from .dataset_builder.builder import DatasetBuilder
+            from .trainer.manager import TrainingManager
+
+            builder = DatasetBuilder(self.config, self.store)
+            trainer = TrainingManager(self.config, self.store, builder)
+            value = trainer._get_consecutive_merge_failures()
+        except Exception:
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
     def run_continuous(self) -> None:
         """Run daemon continuously with configured interval between cycles."""
         self._setup_signal_handlers()
@@ -640,6 +697,7 @@ class Daemon:
             state.episodes_this_cycle = result.tasks_executed
             state.total_episodes += result.tasks_executed
             self.save_state(state)
+            self._finalize_cycle(result)
 
             print(f"Cycle {state.cycles_completed}: {result.status}, "
                   f"{result.tasks_executed} tasks, "
