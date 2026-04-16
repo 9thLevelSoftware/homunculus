@@ -1,16 +1,29 @@
 # Project State
 
 ## Current Position
-- **Phase**: 1 of 5 (Daemon Mode)
-- **Status**: Phase 1 complete — review passed (1 cycle)
-- **Last Activity**: Phase 1 review passed (2026-04-16)
+- **Phase**: 2 of 5 (Introspection System)
+- **Status**: Phase 2 complete — all 5 plans executed successfully
+- **Last Activity**: Phase 2 execution (2026-04-15)
 
 ## Progress
 ```
-[####................] 25% — 4/16 plans complete (Phase 0-1 done)
+[#########...........] 56% — 9/16 plans complete (Phase 0-2 done)
 ```
 
 ## Completed Work
+
+### Phase 2: Introspection System (COMPLETE)
+- Created `homunculus/introspection/` package with base protocol and scheduler
+- Added `IntrospectionMode` protocol and `IntrospectionContext` dataclass
+- Added `IntrospectionResult` dataclass to models.py
+- Added `IntrospectionSettings` to config.py with graceful defaults
+- Implemented `IntrospectionScheduler` with mode rotation (metrics:1, critique:3, coverage:5, comparative:3)
+- Implemented `MetricsMode` — quantitative performance metrics
+- Implemented `CoverageMode` — pytest-cov, TODO scanning, test gaps
+- Implemented `CritiqueMode` — LLM-based episode pattern analysis
+- Implemented `ComparativeMode` — winner vs loser patch comparison
+- Added introspection result persistence to storage.py
+- Commits: `fe29ded`, `3b2e70a`
 
 ### Phase 1: Daemon Mode (COMPLETE)
 - Added `DaemonSettings` dataclass to config.py
@@ -52,6 +65,36 @@
 | Config interval is respected between cycles | Pass |
 | Tests cover signal handling and state persistence | Pass (7 new tests) |
 
+## Phase 2 Plan Summary
+
+| Plan | Wave | Title | Agent |
+|------|------|-------|-------|
+| 02-01 | 1 | Infrastructure (scheduler, config, storage) | Senior Developer |
+| 02-02 | 2 | Metrics Mode | Data Analytics Engineer |
+| 02-03 | 2 | Coverage Mode | Infrastructure & DevOps Engineer |
+| 02-04 | 2 | Critique Mode | AI Engineer |
+| 02-05 | 2 | Comparative Mode | Data Analytics Engineer |
+
+### Auto-Refine Applied (1 cycle)
+Critical issues fixed:
+- Plan 02-01: Added graceful config defaults, cycle 0 edge case fix, result persistence
+- Plan 02-03: Fixed pytest-cov JSON mechanism, use sys.executable
+- Plan 02-04: Fixed teacher API signature (TaskRequest, not raw prompt)
+
+## Phase 2 Verification
+
+| Criteria | Status |
+|----------|--------|
+| IntrospectionMode protocol defined | Pass |
+| IntrospectionScheduler with mode rotation | Pass |
+| MetricsMode computes success/retry/failure rates | Pass |
+| CoverageMode runs pytest-cov and TODO scanning | Pass |
+| CritiqueMode uses teacher API for LLM analysis | Pass |
+| ComparativeMode groups and compares episodes | Pass |
+| All modes implement protocol correctly | Pass |
+| Tests pass (26 total) | Pass |
+| Commits: `fe29ded`, `3b2e70a` | Complete |
+
 ## Next Action
 
-Run `/legion:plan 2` to plan Phase 2: Introspection System
+Run `/legion:review` to verify Phase 2: Introspection System, then `/legion:plan 3` for Task Generation
