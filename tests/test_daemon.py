@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import patch
 import unittest
 
 from homunculus.config import load_config
@@ -497,6 +499,28 @@ class LockSafetyTests(unittest.TestCase):
                 daemon.lock_path.read_text(encoding="utf-8"),
                 original,
                 "lock file must not be overwritten when content is corrupt",
+            )
+
+    def test_lock_vanishing_between_exists_and_read_proceeds(self) -> None:
+        """If lock file is removed between exists() check and read, treat as no lock."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            daemon = Daemon(config)
+
+            daemon.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            # Create the lock then patch read_text to raise FileNotFoundError
+            daemon.lock_path.write_text(str(os.getpid()), encoding="utf-8")
+
+            def vanishing_read(self_path, *args, **kwargs):
+                raise FileNotFoundError(f"vanished: {self_path}")
+
+            with patch.object(type(daemon.lock_path), "read_text", vanishing_read):
+                result = daemon.acquire_lock()
+
+            self.assertTrue(
+                result, "vanishing lock must be treated as 'no lock', not corrupt"
             )
 
     def test_release_lock_only_removes_own_pid(self) -> None:

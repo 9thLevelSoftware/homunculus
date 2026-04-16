@@ -32,6 +32,31 @@ class DaemonCycleResult:
     error: str | None = None
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True if `pid` corresponds to a running process. Cross-platform."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil  # type: ignore
+        return psutil.pid_exists(pid)
+    except ImportError:
+        pass
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # process exists but we can't signal it
+        except OSError:
+            return False
+    # Windows fallback without psutil: be conservative — assume alive.
+    # This means stale Windows locks won't be auto-cleaned without psutil,
+    # but it prevents false-positive overwrites of live locks.
+    return True
+
+
 class Daemon:
     """Daemon that reads tasks, executes episodes, and manages state."""
 
@@ -83,34 +108,47 @@ class Daemon:
     def acquire_lock(self) -> bool:
         """Acquire exclusive daemon lock. Returns False if another instance is running.
 
-        Refuses to overwrite a corrupt or unreadable lock file — operator must
-        manually inspect and remove it. This prevents two daemons from running
-        concurrently when the lock content is unparseable.
+        Refuses to overwrite a corrupt lock file — operator must inspect.
+        Distinguishes "lock vanished mid-read" (proceed) from "lock corrupt" (refuse).
         """
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         if self.lock_path.exists():
             pid_text = ""
             try:
                 pid_text = self.lock_path.read_text(encoding="utf-8").strip()
-                pid = int(pid_text)
-            except (ValueError, OSError):
-                # Corrupt or unreadable lock — bail out for operator inspection
+            except FileNotFoundError:
+                # Lock vanished between exists() and read — proceed as if no lock
+                pass
+            except OSError as exc:
                 logger.error(
-                    "Lock file %s is corrupt (content=%r). Refusing to start. "
-                    "Inspect and delete manually if no daemon is running.",
-                    self.lock_path, pid_text,
+                    "Lock file %s unreadable (%s). Refusing to start.",
+                    self.lock_path, exc,
                 )
                 return False
-            try:
-                os.kill(pid, 0)  # signal 0 only checks process existence
-                return False  # process exists — lock is held
-            except OSError:
+            else:
+                try:
+                    pid = int(pid_text)
+                except ValueError:
+                    logger.error(
+                        "Lock file %s is corrupt (content=%r). Refusing to start. "
+                        "Inspect and delete manually if no daemon is running.",
+                        self.lock_path, pid_text,
+                    )
+                    return False
+                if _pid_alive(pid):
+                    return False
                 logger.info("Removing stale lock for dead PID %d", pid)
         self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
         return True
 
     def release_lock(self) -> None:
-        """Release daemon lock — only if we own it."""
+        """Release daemon lock — only if we own it.
+
+        Note: there is a small TOCTOU window between reading the PID and unlinking;
+        another process could take ownership in between. Risk is low because the
+        PID would have to match os.getpid(), and we trust other daemons to also
+        respect the ownership check.
+        """
         if not self.lock_path.exists():
             return
         try:
