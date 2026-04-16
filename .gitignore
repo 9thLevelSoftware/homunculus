@@ -14,4 +14,4 @@ build/
 htmlcov/
 .env
 *.log
-runtime/worktrees/
+runtime/
