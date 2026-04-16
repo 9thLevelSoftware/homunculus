@@ -4,12 +4,17 @@ import argparse
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import HomunculusConfig, load_config
-from .models import DaemonState, GeneratedTask
+from .models import DaemonState, GeneratedTask, utc_now
 from .suggestions import SuggestionReader
+
+if TYPE_CHECKING:
+    from .orchestrator.loop import EpisodeOrchestrator
 
 
 @dataclass
@@ -27,9 +32,11 @@ class Daemon:
     def __init__(
         self,
         config: HomunculusConfig,
+        orchestrator: "EpisodeOrchestrator | None" = None,
         suggestions_dir: Path | None = None,
     ) -> None:
         self.config = config
+        self.orchestrator = orchestrator
         self.suggestions_dir = suggestions_dir or (config.paths.root / config.daemon.suggestions_dir)
         self.suggestion_reader = SuggestionReader(self.suggestions_dir)
         self._shutdown_event = threading.Event()
@@ -103,33 +110,124 @@ class Daemon:
         if not tasks:
             return DaemonCycleResult(status="idle", tasks_executed=0)
 
-        # For Phase 0, we just return that we found tasks.
-        # Full episode execution will be wired up when testing with real teacher.
+        # No orchestrator = dry run mode (for testing)
+        if not self.orchestrator:
+            return DaemonCycleResult(status="executed", tasks_executed=len(tasks))
+
+        executed = 0
+        accepted = 0
+        reverted = 0
+
+        target_workspace = self.config.daemon.target_workspace
+        for task in tasks[:self.config.daemon.max_episodes_per_cycle]:
+            if self.shutdown_requested:
+                break
+
+            try:
+                task_request = task.to_task_request(target_workspace)
+                episode = self.orchestrator.run_episode(task_request)
+                executed += 1
+                filename = task.context.get("filename", "")
+                if episode.outcome == "accepted":
+                    accepted += 1
+                    self.suggestion_reader.archive(filename, "accepted")
+                else:
+                    reverted += 1
+                    if episode.outcome == "reverted":
+                        self.suggestion_reader.archive(filename, "reverted")
+            except Exception as e:
+                return DaemonCycleResult(
+                    status="error",
+                    tasks_executed=executed,
+                    tasks_accepted=accepted,
+                    tasks_reverted=reverted,
+                    error=str(e),
+                )
+
         return DaemonCycleResult(
             status="executed",
-            tasks_executed=len(tasks),
+            tasks_executed=executed,
+            tasks_accepted=accepted,
+            tasks_reverted=reverted,
         )
+
+    def run_continuous(self) -> None:
+        """Run daemon continuously with configured interval between cycles."""
+        state = self.load_state()
+        interval_seconds = self.config.daemon.cycle_interval_minutes * 60
+
+        print(f"Daemon started. Cycle interval: {self.config.daemon.cycle_interval_minutes} minutes")
+        print(f"State: {state.cycles_completed} cycles, {state.total_episodes} episodes")
+        print("Press Ctrl+C to stop gracefully.")
+
+        while not self.shutdown_requested:
+            # Run a cycle
+            result = self.run_once()
+
+            # Update state
+            state.cycles_completed += 1
+            state.last_cycle_at = utc_now()
+            state.episodes_this_cycle = result.tasks_executed
+            state.total_episodes += result.tasks_executed
+            self.save_state(state)
+
+            print(f"Cycle {state.cycles_completed}: {result.status}, "
+                  f"{result.tasks_executed} tasks, "
+                  f"{result.tasks_accepted} accepted, "
+                  f"{result.tasks_reverted} reverted")
+
+            if self.shutdown_requested:
+                break
+
+            # Sleep until next cycle (Plan 03 will make this interruptible)
+            time.sleep(interval_seconds)
+
+        # Final state save on shutdown
+        self.save_state(state)
+        print(f"Daemon stopped. Final state: {state.cycles_completed} cycles, {state.total_episodes} episodes")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="homunculus.daemon")
     parser.add_argument("--config", required=True, help="Path to config file")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Run without orchestrator (no real episode execution)")
     parser.add_argument("--suggestions-dir", help="Override suggestions directory")
     args = parser.parse_args()
 
     config = load_config(args.config)
     suggestions_dir = Path(args.suggestions_dir) if args.suggestions_dir else None
-    daemon = Daemon(config, suggestions_dir=suggestions_dir)
 
-    if args.once:
-        result = daemon.run_once()
-        print(f"Cycle complete: {result.status}, {result.tasks_executed} tasks")
+    # Validate target workspace exists
+    if config.daemon.target_workspace not in config.workspaces:
+        print(f"Error: Target workspace '{config.daemon.target_workspace}' not found in config.")
+        print(f"Available workspaces: {list(config.workspaces.keys())}")
+        return 1
+
+    # Build orchestrator for real execution (unless dry-run)
+    orchestrator = None
+    if not args.dry_run:
+        from .runtime import build_runtime
+        _, _, _, _, orchestrator, _, _ = build_runtime(args.config)
+
+    daemon = Daemon(config, orchestrator=orchestrator, suggestions_dir=suggestions_dir)
+
+    # Check for existing daemon instance
+    if not daemon.acquire_lock():
+        print("Error: Another daemon instance is already running.")
+        return 1
+
+    try:
+        if args.once:
+            result = daemon.run_once()
+            print(f"Cycle complete: {result.status}, {result.tasks_executed} tasks")
+            return 0
+
+        # Continuous mode
+        daemon.run_continuous()
         return 0
-
-    # Continuous mode will be implemented in Phase 1 by the agent itself
-    print("Continuous daemon mode not yet implemented. Use --once for single cycle.")
-    return 1
+    finally:
+        daemon.release_lock()
 
 
 if __name__ == "__main__":
