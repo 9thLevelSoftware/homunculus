@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -442,7 +443,7 @@ class MergeManagerTests(unittest.TestCase):
         self.assertEqual(len(candidates), 2)
 
     def test_merge_creates_manifest(self):
-        from homunculus.evolution.merge import MergeManager, MergeResult
+        from homunculus.evolution.merge import MergeManager
 
         loras = [
             AdapterManifest(
@@ -459,18 +460,21 @@ class MergeManagerTests(unittest.TestCase):
             )
         ]
 
-        # Mock the actual merge to avoid needing real backends
+        # Pin backend so we exercise the full mergekit path (YAML
+        # construction, argv assembly, subprocess invocation). We mock
+        # at the subprocess boundary, not at the method boundary — this
+        # catches regressions in YAML/argv without spawning real tools.
+        self.config.evolution.merge_backend = "mergekit"
         mgr = MergeManager(self.config, self.store)
-        mgr._merge_with_mergekit = MagicMock(
-            return_value=MergeResult(success=True, output_path="/out")
+        fake_proc = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
         )
-        mgr._merge_with_mlx = MagicMock(
-            return_value=MergeResult(success=True, output_path="/out")
-        )
+        with patch("homunculus.evolution.merge.subprocess.run", return_value=fake_proc), \
+             patch.object(mgr, "_bake_lora_into_base",
+                          return_value=str(self.temp_path / "baked" / "lora1")):
+            result = mgr.merge(loras)
 
-        result = mgr.merge(loras)
-
-        # Verify manifest was created
+        self.assertTrue(result.success, f"expected success, got {result.error_message}")
         self.store.append_merge.assert_called_once()
         manifest = self.store.append_merge.call_args[0][0]
         self.assertEqual(manifest.source_loras, ["lora1"])
@@ -486,7 +490,7 @@ class MergeManagerTests(unittest.TestCase):
         self.assertIn("No LoRAs", result.error_message)
 
     def test_merge_updates_manifest_on_success(self):
-        from homunculus.evolution.merge import MergeManager, MergeResult
+        from homunculus.evolution.merge import MergeManager
 
         loras = [
             AdapterManifest(
@@ -503,15 +507,15 @@ class MergeManagerTests(unittest.TestCase):
             )
         ]
 
+        self.config.evolution.merge_backend = "mergekit"
         mgr = MergeManager(self.config, self.store)
-        mgr._merge_with_mergekit = MagicMock(
-            return_value=MergeResult(success=True, output_path="/out")
+        fake_proc = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
         )
-        mgr._merge_with_mlx = MagicMock(
-            return_value=MergeResult(success=True, output_path="/out")
-        )
-
-        result = mgr.merge(loras)
+        with patch("homunculus.evolution.merge.subprocess.run", return_value=fake_proc), \
+             patch.object(mgr, "_bake_lora_into_base",
+                          return_value=str(self.temp_path / "baked" / "lora1")):
+            result = mgr.merge(loras)
 
         self.assertTrue(result.success)
         self.store.update_merge.assert_called_once()
@@ -520,7 +524,7 @@ class MergeManagerTests(unittest.TestCase):
         self.assertIsNotNone(updated_manifest.completed_at)
 
     def test_merge_updates_manifest_on_failure(self):
-        from homunculus.evolution.merge import MergeManager, MergeResult
+        from homunculus.evolution.merge import MergeManager
 
         loras = [
             AdapterManifest(
@@ -537,21 +541,25 @@ class MergeManagerTests(unittest.TestCase):
             )
         ]
 
+        self.config.evolution.merge_backend = "mergekit"
         mgr = MergeManager(self.config, self.store)
-        mgr._merge_with_mergekit = MagicMock(
-            return_value=MergeResult(success=False, error_message="Something went wrong")
+        # mergekit nonzero exit → MergeResult.success=False AND stderr
+        # must propagate into error_message so operators can diagnose.
+        fake_proc = subprocess.CompletedProcess(
+            args=[], returncode=2,
+            stdout="",
+            stderr="Something went wrong",
         )
-        mgr._merge_with_mlx = MagicMock(
-            return_value=MergeResult(success=False, error_message="Something went wrong")
-        )
-
-        result = mgr.merge(loras)
+        with patch("homunculus.evolution.merge.subprocess.run", return_value=fake_proc), \
+             patch.object(mgr, "_bake_lora_into_base",
+                          return_value=str(self.temp_path / "baked" / "lora1")):
+            result = mgr.merge(loras)
 
         self.assertFalse(result.success)
         self.store.update_merge.assert_called_once()
         updated_manifest = self.store.update_merge.call_args[0][0]
         self.assertEqual(updated_manifest.status, "failed")
-        self.assertEqual(updated_manifest.error_message, "Something went wrong")
+        self.assertIn("Something went wrong", updated_manifest.error_message or "")
 
     def test_generate_mergekit_config_linear(self):
         from homunculus.evolution.merge import MergeManager
@@ -1626,28 +1634,24 @@ class MergeBaseConsistencyTests(unittest.TestCase):
 
     def test_homogeneous_base_proceeds(self):
         """Sanity: same-base LoRAs should NOT raise from this guard."""
-        from homunculus.evolution.merge import MergeResult
-
+        self.config.evolution.merge_backend = "mergekit"
         mgr = self._make_manager()
         loras = [
             self._make_lora("L1", "B1"),
             self._make_lora("L2", "B1"),
         ]
-        # Stub out the actual backend so we don't run a real subprocess
-        with patch.object(
-            mgr, "_merge_with_mergekit",
-            return_value=MergeResult(success=True, output_path="/out"),
-        ), patch.object(
-            mgr, "_merge_with_mlx",
-            return_value=MergeResult(success=True, output_path="/out"),
-        ):
+        # Subprocess-level mock: forces YAML/argv construction to run
+        # but doesn't spawn a real mergekit process.
+        fake_proc = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="",
+        )
+        with patch("homunculus.evolution.merge.subprocess.run", return_value=fake_proc), \
+             patch.object(mgr, "_bake_lora_into_base",
+                          return_value=str(self.temp_path / "baked")):
             try:
                 mgr.merge(loras)
             except ValueError as e:
                 self.fail(f"Homogeneous base must NOT raise ValueError: {e}")
-            except Exception:
-                # Other exceptions (e.g., from store side-effects) are out of scope
-                pass
 
 
 class MLXMergeMathTests(unittest.TestCase):
