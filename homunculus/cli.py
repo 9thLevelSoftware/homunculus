@@ -177,7 +177,6 @@ def main() -> int:
     promote_parser = subparsers.add_parser("promote-candidate")
     promote_parser.add_argument("--config", required=True)
     promote_parser.add_argument("--candidate-id", required=True)
-    promote_parser.add_argument("--human-approved", action="store_true")
     promote_parser.set_defaults(func=cmd_promote_candidate)
 
     doctor_parser = subparsers.add_parser("doctor")
