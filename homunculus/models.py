@@ -302,3 +302,42 @@ class IntrospectionResult:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "IntrospectionResult":
         return cls(**payload)
+
+
+@dataclass
+class TaskQueueEntry:
+    """Entry in the task queue with status tracking."""
+
+    task_id: str  # Unique identifier (matches GeneratedTask.task_id)
+    task: GeneratedTask  # The actual task
+    queued_at: str  # UTC timestamp when added to queue
+    status: str  # "pending" | "in_progress" | "completed" | "failed"
+    attempts: int = 0  # Number of execution attempts
+    last_error: str | None = None  # Error message from last attempt
+    completed_at: str | None = None  # UTC timestamp when completed
+    outcome: str | None = None  # "accepted" | "reverted" | "error"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "task": self.task.to_dict(),  # Nested serialization
+            "queued_at": self.queued_at,
+            "status": self.status,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "completed_at": self.completed_at,
+            "outcome": self.outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskQueueEntry":
+        return cls(
+            task_id=data["task_id"],
+            task=GeneratedTask.from_dict(data["task"]),
+            queued_at=data["queued_at"],
+            status=data["status"],
+            attempts=data.get("attempts", 0),
+            last_error=data.get("last_error"),
+            completed_at=data.get("completed_at"),
+            outcome=data.get("outcome"),
+        )

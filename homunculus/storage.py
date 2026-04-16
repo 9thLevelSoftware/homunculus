@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import HomunculusConfig
-from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, IntrospectionResult, PreferencePair, SFTSample
+from .models import AdapterManifest, DatasetSnapshot, EpisodeRecord, IntrospectionResult, PreferencePair, SFTSample, TaskQueueEntry, utc_now
 
 
 class ArtifactStore:
@@ -203,3 +203,146 @@ class ArtifactStore:
         if mode is not None:
             results = [r for r in results if r.mode == mode]
         return results
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Task Queue Persistence
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _queue_path(self) -> Path:
+        """Path to the task queue JSONL file."""
+        return self.runtime_dir / "task_queue.jsonl"
+
+    def _history_path(self) -> Path:
+        """Path to the task history JSONL file."""
+        return self.runtime_dir / "task_history.jsonl"
+
+    def append_to_queue(self, entry: TaskQueueEntry) -> None:
+        """Append a task queue entry to runtime/task_queue.jsonl.
+
+        Args:
+            entry: The task queue entry to append
+        """
+        self.append_jsonl(self._queue_path(), entry.to_dict())
+
+    def load_queue(self) -> list[TaskQueueEntry]:
+        """Load pending tasks from runtime/task_queue.jsonl.
+
+        Returns:
+            List of TaskQueueEntry objects with status="pending"
+        """
+        entries = [
+            TaskQueueEntry.from_dict(item)
+            for item in self.load_jsonl(self._queue_path())
+        ]
+        return [e for e in entries if e.status == "pending"]
+
+    def load_all_queue_entries(self) -> list[TaskQueueEntry]:
+        """Load all task queue entries regardless of status.
+
+        Returns:
+            List of all TaskQueueEntry objects
+        """
+        return [
+            TaskQueueEntry.from_dict(item)
+            for item in self.load_jsonl(self._queue_path())
+        ]
+
+    def update_queue_entry(
+        self,
+        task_id: str,
+        status: str,
+        outcome: str | None = None,
+        last_error: str | None = None,
+        increment_attempts: bool = False,
+    ) -> None:
+        """Update a task queue entry's status.
+
+        Reads the entire queue, updates the matching entry, and rewrites the file
+        atomically using a temp file + os.replace pattern.
+
+        Args:
+            task_id: The task ID to update
+            status: New status value
+            outcome: Optional outcome (e.g., "accepted", "reverted", "error")
+            last_error: Optional error message from last attempt
+            increment_attempts: If True, increment the attempts counter
+        """
+        import os
+        import tempfile
+
+        queue_path = self._queue_path()
+        entries = self.load_all_queue_entries()
+
+        for entry in entries:
+            if entry.task_id == task_id:
+                entry.status = status
+                if outcome is not None:
+                    entry.outcome = outcome
+                if last_error is not None:
+                    entry.last_error = last_error
+                if increment_attempts:
+                    entry.attempts += 1
+                if status in ("completed", "failed"):
+                    entry.completed_at = utc_now()
+                break
+
+        # Atomic write: write to temp file, then replace
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            dir=queue_path.parent,
+            prefix=".task_queue_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for entry in entries:
+                    handle.write(json.dumps(entry.to_dict(), ensure_ascii=True) + "\n")
+            os.replace(temp_path, queue_path)
+        except Exception:
+            # Clean up temp file on failure
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
+    def archive_completed_tasks(self) -> int:
+        """Move completed/failed entries from task_queue.jsonl to task_history.jsonl.
+
+        Returns:
+            Count of archived entries
+        """
+        import os
+        import tempfile
+
+        queue_path = self._queue_path()
+        history_path = self._history_path()
+
+        entries = self.load_all_queue_entries()
+        to_archive = [e for e in entries if e.status in ("completed", "failed")]
+        to_keep = [e for e in entries if e.status not in ("completed", "failed")]
+
+        if not to_archive:
+            return 0
+
+        # Append to history
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        with history_path.open("a", encoding="utf-8") as handle:
+            for entry in to_archive:
+                handle.write(json.dumps(entry.to_dict(), ensure_ascii=True) + "\n")
+
+        # Atomic rewrite of queue with only non-archived entries
+        fd, temp_path = tempfile.mkstemp(
+            dir=queue_path.parent,
+            prefix=".task_queue_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for entry in to_keep:
+                    handle.write(json.dumps(entry.to_dict(), ensure_ascii=True) + "\n")
+            os.replace(temp_path, queue_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
+        return len(to_archive)
