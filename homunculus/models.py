@@ -85,6 +85,48 @@ class TaskExecutionResult:
 
 
 @dataclass
+class CommitResult:
+    committed: bool
+    commit_sha: str | None = None
+    message: str | None = None
+
+
+@dataclass
+class GeneratedTask:
+    task_id: str
+    source: str  # "introspection" | "user" | "continuation"
+    prompt: str
+    priority: float = 0.5  # 0.0 - 1.0
+    introspection_mode: str | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+    estimated_complexity: str = "medium"  # "trivial" | "small" | "medium" | "large"
+    target_files: list[str] = field(default_factory=list)
+    success_criteria: str = ""
+    created_at: str = field(default_factory=utc_now)
+    expires_at: str | None = None
+
+    def to_task_request(self, workspace: str) -> TaskRequest:
+        """Convert to TaskRequest for episode execution."""
+        return TaskRequest(
+            task_id=self.task_id,
+            workspace=workspace,
+            prompt=self.prompt,
+            metadata={
+                "source": self.source,
+                "priority": self.priority,
+                "introspection_mode": self.introspection_mode,
+            }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GeneratedTask":
+        return cls(**payload)
+
+
+@dataclass
 class EpisodeRecord:
     episode_id: str
     task_id: str
@@ -194,7 +236,6 @@ class AdapterManifest:
     created_at: str
     candidate_id: str | None = None
     lineage: list[str] = field(default_factory=list)
-    human_approved: bool = False
     promotion_reason: str | None = None
     training_command: list[str] = field(default_factory=list)
     sample_counts: dict[str, Any] = field(default_factory=dict)

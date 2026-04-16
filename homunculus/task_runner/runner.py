@@ -7,7 +7,7 @@ import shutil
 import subprocess
 
 from ..config import WorkspaceSettings
-from ..models import TaskExecutionResult, VerificationResult
+from ..models import TaskExecutionResult, VerificationResult, CommitResult
 
 
 class WorkspacePreflightError(RuntimeError):
@@ -158,6 +158,34 @@ class TaskRunner:
             if applied:
                 self.revert(snapshot)
             raise
+
+    def commit_to_source(
+        self,
+        workspace: WorkspaceSettings,
+        task_id: str,
+        episode_id: str,
+        message: str,
+    ) -> CommitResult:
+        """Commit staged and unstaged changes to the source repository."""
+        workspace_path = workspace.path
+
+        # Check if there are any changes to commit
+        status = self._run_git(workspace_path, ["status", "--porcelain"], check=True)
+        if not status.stdout.strip():
+            return CommitResult(committed=False)
+
+        # Stage all changes
+        self._run_git(workspace_path, ["add", "-A"], check=True)
+
+        # Create commit with metadata in message
+        full_message = f"{message}\n\nEpisode-ID: {episode_id}\nTask-ID: {task_id}"
+        self._run_git(workspace_path, ["commit", "-m", full_message], check=True)
+
+        # Get the commit SHA
+        result = self._run_git(workspace_path, ["rev-parse", "HEAD"], check=True)
+        commit_sha = result.stdout.strip()
+
+        return CommitResult(committed=True, commit_sha=commit_sha, message=message)
 
     def read_patch(self, workspace_path: Path) -> str:
         return self._run_git(workspace_path, ["diff", "--no-ext-diff", "--binary"], check=True).stdout

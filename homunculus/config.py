@@ -52,7 +52,6 @@ class ThresholdSettings:
 
 @dataclass
 class PromotionSettings:
-    require_human_approval: bool
     allow_zero_canary_regressions: bool
     min_task_success_delta: float
     max_tool_misuse_increase: float
