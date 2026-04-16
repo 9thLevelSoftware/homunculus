@@ -194,7 +194,6 @@ class AdapterManifest:
     created_at: str
     candidate_id: str | None = None
     lineage: list[str] = field(default_factory=list)
-    human_approved: bool = False
     promotion_reason: str | None = None
     training_command: list[str] = field(default_factory=list)
     sample_counts: dict[str, Any] = field(default_factory=dict)

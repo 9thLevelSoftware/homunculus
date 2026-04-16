@@ -92,7 +92,7 @@ def cmd_promote_candidate(args: argparse.Namespace) -> int:
     candidate = store.get_candidate(args.candidate_id)
     if not candidate:
         raise SystemExit(f"Unknown candidate: {args.candidate_id}")
-    candidate = trainer.promote_candidate(candidate, human_approved=args.human_approved)
+    candidate = trainer.promote_candidate(candidate)
     print(json.dumps(candidate.to_dict(), indent=2))
     return 0
 

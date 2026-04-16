@@ -36,7 +36,6 @@ min_eval_success_delta = 0.01
 failure_growth_threshold = 2
 
 [promotion]
-require_human_approval = true
 allow_zero_canary_regressions = true
 min_task_success_delta = 0.01
 max_tool_misuse_increase = 0.0

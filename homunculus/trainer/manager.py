@@ -106,14 +106,11 @@ class TrainingManager:
         self.store.update_candidate(candidate)
         return candidate
 
-    def promote_candidate(self, candidate: AdapterManifest, human_approved: bool = False) -> AdapterManifest:
-        if self.config.promotion.require_human_approval and not human_approved:
-            raise RuntimeError("Human approval is required before promotion.")
+    def promote_candidate(self, candidate: AdapterManifest) -> AdapterManifest:
         if not candidate.metrics:
             raise RuntimeError("Candidate must be evaluated before promotion.")
         metrics = EvaluationMetrics.from_dict(candidate.metrics)
         allowed, reasons = self._promotion_gates(candidate, metrics)
-        candidate.human_approved = human_approved
         if allowed:
             candidate.status = "promoted"
             candidate.evaluation_status = "eligible"

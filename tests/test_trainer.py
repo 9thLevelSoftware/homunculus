@@ -53,7 +53,7 @@ class TrainerTests(unittest.TestCase):
             self.assertTrue(Path(manifest.snapshot_path or "").exists())
             self.assertIsNotNone(store.get_candidate(manifest.candidate_id or ""))
 
-    def test_evaluate_does_not_activate_and_promote_requires_approval(self) -> None:
+    def test_evaluate_then_promote_activates_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             temp_path = Path(temp_root)
             config = load_config(self._config_path(temp_path))
@@ -74,8 +74,10 @@ class TrainerTests(unittest.TestCase):
             evaluated = trainer.evaluate_candidate(candidate, metrics)
             self.assertEqual(evaluated.status, "evaluated")
             self.assertIsNone(store.active_candidate())
-            with self.assertRaises(RuntimeError):
-                trainer.promote_candidate(evaluated, human_approved=False)
+            # Now promotion should succeed without approval
+            promoted = trainer.promote_candidate(evaluated)
+            self.assertEqual(promoted.status, "promoted")
+            self.assertIsNotNone(store.active_candidate())
 
 
 if __name__ == "__main__":
