@@ -1650,5 +1650,125 @@ class MergeBaseConsistencyTests(unittest.TestCase):
                 pass
 
 
+class MLXMergeMathTests(unittest.TestCase):
+    """Correctness of the MLX merge math helpers.
+
+    These tests use plain numpy arrays instead of mlx.core arrays so they
+    run on any platform (CI, Windows, Linux). The helper only relies on
+    the ``@`` matmul operator and ``+``, both of which numpy supports.
+    The ``mx`` import is guarded at call-site and not exercised here.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.tmp.name)
+        self.config = MagicMock()
+        self.config.evolution.merge_backend = "mlx"
+        self.config.evolution.auto_merge_after_loras = 3
+        self.config.paths.models_dir = self.temp_path / "models"
+        self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
+        self.store = MagicMock()
+        self.store.load_registry.return_value = {"candidates": [], "history": []}
+        self.store.load_merges.return_value = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_manager(self):
+        from homunculus.evolution.merge import MergeManager
+        return MergeManager(self.config, self.store)
+
+    def test_read_lora_config_uses_alpha_and_r_from_file(self):
+        adapter_dir = self.temp_path / "adapter"
+        adapter_dir.mkdir()
+        (adapter_dir / "adapter_config.json").write_text(
+            json.dumps({"lora_alpha": 32, "r": 8}),
+            encoding="utf-8",
+        )
+        mgr = self._make_manager()
+        alpha, rank = mgr._read_lora_config(str(adapter_dir))
+        self.assertEqual(alpha, 32)
+        self.assertEqual(rank, 8)
+
+    def test_read_lora_config_defaults_when_file_missing(self):
+        mgr = self._make_manager()
+        alpha, rank = mgr._read_lora_config(str(self.temp_path / "nonexistent"))
+        # Defaults: alpha=16, r=8 (mirrors PEFT's own defaults)
+        self.assertEqual(alpha, 16)
+        self.assertEqual(rank, 8)
+
+    def test_apply_lora_zero_matches_raises_runtime_error(self):
+        """PEFT-prefixed keys must not silently no-op when base uses short keys.
+
+        Regression: the original code compared ``base_model.model.<path>.weight``
+        against ``<path>.weight`` and produced zero matches, returning the
+        base unchanged. This produced a 'merged' model identical to the
+        source — a silent failure we would have shipped.
+        """
+        import numpy as np
+
+        mgr = self._make_manager()
+        base = {"model.layers.0.q_proj.weight": np.zeros((4, 4))}
+        # PEFT-style keys (base_model.model.* prefix + .weight suffix on adapter)
+        # that intentionally DO NOT match any base key.
+        lora = {
+            "base_model.model.some.unrelated.module.lora_A.weight": np.ones((2, 4)),
+            "base_model.model.some.unrelated.module.lora_B.weight": np.ones((4, 2)),
+        }
+        with self.assertRaises(RuntimeError) as ctx:
+            mgr._apply_lora_to_weights(base, lora, scale=1.0, alpha=16, rank=8)
+        self.assertIn("zero", str(ctx.exception).lower())
+
+    def test_apply_lora_peft_prefix_is_stripped_and_delta_applied(self):
+        """With proper prefix stripping, a PEFT-style LoRA applies to the base."""
+        import numpy as np
+
+        mgr = self._make_manager()
+        # Base has a simple key; LoRA has PEFT's 'base_model.model.' prefix
+        # and '.lora_A.weight'/'.lora_B.weight' suffix.
+        base_w = np.zeros((4, 4), dtype=np.float32)
+        a = np.ones((2, 4), dtype=np.float32)   # (r, in_features)
+        b = np.ones((4, 2), dtype=np.float32)   # (out_features, r)
+        base = {"model.layers.0.q_proj.weight": base_w.copy()}
+        lora = {
+            "base_model.model.model.layers.0.q_proj.lora_A.weight": a,
+            "base_model.model.model.layers.0.q_proj.lora_B.weight": b,
+        }
+        result = mgr._apply_lora_to_weights(
+            base, lora, scale=1.0, alpha=16, rank=8,
+        )
+        # Delta = scale * (alpha/r) * (B @ A) = 1.0 * 2.0 * (ones(4,2) @ ones(2,4))
+        #       = 2.0 * [[2,2,2,2],...] = all 4s.
+        expected = np.full((4, 4), 4.0, dtype=np.float32)
+        merged = result["model.layers.0.q_proj.weight"]
+        self.assertTrue(
+            np.allclose(merged, expected),
+            f"Expected all-4 matrix after scaled delta; got:\n{merged}",
+        )
+
+    def test_apply_lora_scales_by_alpha_over_rank(self):
+        """Delta must scale by alpha/r, not just the raw (B @ A)."""
+        import numpy as np
+
+        mgr = self._make_manager()
+        base = {"linear.weight": np.zeros((2, 2), dtype=np.float32)}
+        a = np.eye(2, dtype=np.float32)
+        b = np.eye(2, dtype=np.float32)
+        lora = {
+            "base_model.model.linear.lora_A.weight": a,
+            "base_model.model.linear.lora_B.weight": b,
+        }
+        # alpha=32, r=8 → scale multiplier 4.0
+        result = mgr._apply_lora_to_weights(
+            base, lora, scale=1.0, alpha=32, rank=8,
+        )
+        merged = result["linear.weight"]
+        expected = np.eye(2, dtype=np.float32) * 4.0
+        self.assertTrue(
+            np.allclose(merged, expected),
+            f"alpha/r scaling broken. Expected 4*I, got:\n{merged}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

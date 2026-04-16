@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -11,6 +13,8 @@ from typing import Any, Literal
 from ..config import HomunculusConfig
 from ..models import AdapterManifest, MergeManifest, utc_now
 from ..storage import ArtifactStore
+
+logger = logging.getLogger(__name__)
 
 
 def detect_backend() -> Literal["mergekit", "mlx"]:
@@ -302,40 +306,57 @@ class MergeManager:
         manifest: MergeManifest,
         loras: list[AdapterManifest],
     ) -> MergeResult:
-        """Merge LoRAs using MLX (Apple Silicon native)."""
+        """Merge LoRAs into a base model via MLX (Apple Silicon native).
+
+        Three fixes vs. the original:
+        1. Uses ``mlx_lm.utils.save_weights`` + manual tokenizer/config persistence
+           instead of the non-existent ``mlx_lm.save`` symbol.
+        2. Reads each LoRA's ``adapter_config.json`` for ``alpha``/``r`` so the
+           PEFT scaling ``(alpha/r) * (B @ A)`` is applied correctly. The
+           previous implementation under-scaled by ~2-4x.
+        3. Any per-LoRA apply that matches zero base keys raises
+           ``RuntimeError`` (caught here and surfaced as a failed merge)
+           rather than silently producing the unchanged base model.
+        """
         try:
-            import mlx.core as mx
-            from mlx_lm import load, save
+            from mlx_lm.utils import load, save_weights
         except ImportError:
             return MergeResult(
                 success=False,
                 error_message="MLX not available. Install with: pip install mlx mlx-lm",
             )
 
-        # Prepare output directory
         models_dir = self.config.paths.models_dir
         output_dir = models_dir / "merged" / manifest.merge_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Load base model
             base_model, tokenizer = load(loras[0].base_model)
             base_weights = dict(base_model.parameters())
 
-            # For each LoRA, load and apply
             for lora in loras:
                 lora_weights = self._load_lora_weights(lora.adapter_path)
+                alpha, rank = self._read_lora_config(lora.adapter_path)
                 base_weights = self._apply_lora_to_weights(
                     base_weights,
                     lora_weights,
-                    scale=1.0 / len(loras),  # Equal contribution
+                    scale=1.0 / len(loras),  # average across LoRAs
+                    alpha=alpha,
+                    rank=rank,
                 )
 
-            # Update model with merged weights
             base_model.update(base_weights)
 
-            # Save merged model
-            save(str(output_dir), base_model, tokenizer)
+            save_weights(str(output_dir / "weights.safetensors"), base_weights)
+            try:
+                tokenizer.save_pretrained(str(output_dir))
+            except Exception as exc:
+                logger.warning("Failed to save tokenizer for %s: %s",
+                               manifest.merge_id, exc)
+            src_config = Path(loras[0].base_model) / "config.json"
+            if src_config.exists():
+                import shutil
+                shutil.copy(src_config, output_dir / "config.json")
 
             return MergeResult(
                 success=True,
@@ -343,6 +364,7 @@ class MergeManager:
             )
 
         except Exception as e:
+            logger.exception("MLX merge failed for %s", manifest.merge_id)
             return MergeResult(
                 success=False,
                 error_message=f"MLX merge failed: {e}",
@@ -365,45 +387,108 @@ class MergeManager:
 
         return weights
 
+    def _read_lora_config(self, adapter_path: str) -> tuple[int, int]:
+        """Read ``lora_alpha`` and ``r`` from PEFT's adapter_config.json.
+
+        Falls back to PEFT's own defaults (alpha=16, r=8) when the file
+        is missing or unreadable. Logs a warning in the fallback case so
+        the operator sees a merge may be under-scaled.
+        """
+        cfg_path = Path(adapter_path) / "adapter_config.json"
+        if not cfg_path.exists():
+            logger.warning(
+                "No adapter_config.json at %s; using defaults alpha=16, r=8",
+                adapter_path,
+            )
+            return 16, 8
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Failed to read adapter_config.json at %s (%s); using defaults",
+                adapter_path, exc,
+            )
+            return 16, 8
+        alpha = int(cfg.get("lora_alpha", 16))
+        rank = int(cfg.get("r", 8))
+        return alpha, rank
+
     def _apply_lora_to_weights(
         self,
         base: dict[str, Any],
         lora: dict[str, Any],
+        *,
         scale: float,
+        alpha: int,
+        rank: int,
     ) -> dict[str, Any]:
-        """Apply LoRA weights to base model weights.
+        """Apply a PEFT LoRA adapter's delta to a base weight dict.
 
-        LoRA applies a low-rank update: W' = W + scale * (B @ A)
-        where A and B are the LoRA weight matrices.
+        The PEFT delta is ``(alpha / r) * (B @ A)``. ``scale`` further
+        averages across multiple LoRAs (typically ``1 / len(loras)``).
+
+        PEFT stores adapter keys as::
+
+            base_model.model.<module-path>.lora_A.weight
+            base_model.model.<module-path>.lora_B.weight
+
+        The MLX-loaded base exposes ``<module-path>.weight``. This helper
+        strips PEFT's ``base_model.model.`` prefix and the ``lora_A``/
+        ``lora_a`` suffix variants before comparison.
+
+        Raises:
+            RuntimeError: If the LoRA matches zero base keys. This is the
+                indicator for the silent-no-op bug we ship-regressed against
+                — a merge that applies no deltas is either a key-mismatch
+                bug or a PEFT/MLX version drift we want to notice loudly.
         """
-        try:
-            import mlx.core as mx
-        except ImportError:
-            raise RuntimeError("MLX required for weight application")
-
         result = dict(base)
+        if rank <= 0:
+            raise ValueError(f"LoRA rank must be positive, got {rank}")
+        lora_scale = (alpha / rank) * scale
+        applied = 0
 
-        # LoRA weights are typically named like:
-        # layers.N.self_attn.q_proj.lora_A, layers.N.self_attn.q_proj.lora_B
-        lora_a_keys = [k for k in lora if "lora_A" in k or "lora_a" in k]
+        a_keys = [
+            k for k in lora
+            if k.endswith(".lora_A.weight") or k.endswith(".lora_a.weight")
+        ]
 
-        for a_key in lora_a_keys:
-            b_key = a_key.replace("lora_A", "lora_B").replace("lora_a", "lora_b")
+        for a_key in a_keys:
+            b_key = (
+                a_key
+                .replace(".lora_A.weight", ".lora_B.weight")
+                .replace(".lora_a.weight", ".lora_b.weight")
+            )
             if b_key not in lora:
                 continue
 
-            # Get the base weight key
-            base_key = a_key.replace(".lora_A", "").replace(".lora_a", "")
-            base_key = base_key.replace(".weight", "") + ".weight"
-
+            base_key = a_key
+            if base_key.startswith("base_model.model."):
+                base_key = base_key[len("base_model.model."):]
+            base_key = (
+                base_key
+                .replace(".lora_A.weight", ".weight")
+                .replace(".lora_a.weight", ".weight")
+            )
             if base_key not in result:
                 continue
 
-            # LoRA: W' = W + scale * (B @ A)
             a = lora[a_key]
             b = lora[b_key]
-            delta = scale * (b @ a)
-
+            delta = lora_scale * (b @ a)
             result[base_key] = result[base_key] + delta
+            applied += 1
 
+        if applied == 0:
+            lora_sample = list(lora)[:3]
+            base_sample = list(base)[:3]
+            raise RuntimeError(
+                f"zero deltas applied — LoRA/base key mismatch. "
+                f"LoRA keys sample: {lora_sample}; base keys sample: {base_sample}. "
+                f"Check PEFT version and base-model naming convention."
+            )
+        logger.info(
+            "Applied %d LoRA deltas (alpha=%d, r=%d, scale=%g)",
+            applied, alpha, rank, scale,
+        )
         return result
