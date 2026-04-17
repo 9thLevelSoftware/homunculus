@@ -245,5 +245,38 @@ Add test coverage
             self.assertEqual(tasks[0].priority, 1.0)  # Clamped
 
 
+class SuggestionReaderSourceContractTests(unittest.TestCase):
+    """Lock the ``source`` literal emitted when a suggestion is
+    materialized as a ``GeneratedTask`` (see B3)."""
+
+    def test_emitted_task_has_user_source(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from homunculus.suggestions import SuggestionReader
+        from homunculus.autonomy.sources import SUGGESTION_SOURCES
+
+        with tempfile.TemporaryDirectory() as tmp:
+            suggestions_dir = Path(tmp) / "suggestions"
+            suggestions_dir.mkdir()
+            (suggestions_dir / "fix-the-thing.md").write_text(
+                "# Fix The Thing\n\n## What\nFix the thing that is broken.\n",
+                encoding="utf-8",
+            )
+            reader = SuggestionReader(suggestions_dir=suggestions_dir)
+            tasks = reader.read_pending()
+            self.assertTrue(
+                tasks,
+                "reader must yield at least one task for the contract "
+                "assertion to be non-vacuous",
+            )
+            for task in tasks:
+                self.assertIn(
+                    task.source,
+                    SUGGESTION_SOURCES,
+                    f"SuggestionReader emitted {task.source!r} which is "
+                    f"not in SUGGESTION_SOURCES={SUGGESTION_SOURCES}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
