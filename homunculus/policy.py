@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from .config import GuardrailSettings
 from .models import GuardrailDecision, MemoryRecord
 
@@ -17,11 +15,11 @@ class GuardrailEngine:
         memory_refs: list[str] = []
 
         for rule in self.settings.warn_patterns:
-            if re.search(rule.pattern, body, re.IGNORECASE | re.MULTILINE):
+            if rule.regex.search(body):
                 warnings.append(rule.message)
 
         for rule in self.settings.block_patterns:
-            if re.search(rule.pattern, body, re.IGNORECASE | re.MULTILINE):
+            if rule.regex.search(body):
                 blocked.append(rule.message)
 
         for memory in memories:
