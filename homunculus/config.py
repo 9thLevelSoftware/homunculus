@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +97,22 @@ class DPOSettings:
 class PatternRule:
     pattern: str
     message: str
+
+
+@dataclass(frozen=True)
+class CompiledGuardrailRule:
+    """A guardrail pattern with its regex pre-compiled at config load.
+
+    ``pattern`` is the original string (kept for diagnostics / serialization
+    round-trips). ``regex`` is the compiled counterpart used by
+    :class:`GuardrailEngine`. Compilation happens once in
+    :func:`_parse_rules` so a malformed pattern fails ``load_config``
+    rather than the first episode.
+    """
+
+    pattern: str
+    message: str
+    regex: "re.Pattern[str]"
 
 
 @dataclass
