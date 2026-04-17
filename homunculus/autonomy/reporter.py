@@ -26,6 +26,27 @@ from .models import AutonomyReport, WatchdogSnapshot
 _TREND_WINDOW = 50
 
 
+# Episode-success states: only ``accepted`` represents a merged-into-workspace
+# success per :class:`EpisodeRecord`. The other terminal outcomes
+# (``reverted`` / ``blocked`` / ``error``) are failures for patch-success-rate
+# purposes.
+EPISODE_SUCCESS_STATES = frozenset({"accepted"})
+
+# Task-history success states: queue/history rows accept either ``success``
+# (SC2 literal) or ``accepted`` (the EpisodeRecord outcome the queue mirrors).
+# Phase 3 didn't fully unify the vocabulary, so both are live in the fleet's
+# on-disk artifacts; this set is intentionally broader than
+# ``EPISODE_SUCCESS_STATES``.
+TASK_HISTORY_SUCCESS_STATES = frozenset({"success", "accepted"})
+
+# Candidate-status values that count as "merged into base". Source of truth:
+# ``homunculus/trainer/manager.py`` writes ``status="merged"`` after a
+# successful merge and ``status="promoted"`` after promotion. Other status
+# values (``training`` / ``trained`` / ``failed`` / ``evaluated`` / ``rejected``
+# / ``validated``) are not merge-into-base markers.
+MERGED_CANDIDATE_STATES = frozenset({"merged", "promoted"})
+
+
 def generate_report(
     runtime_dir: Path,
     traces_dir: Path,
@@ -188,7 +209,8 @@ def _load_episodes(
 
 
 def _is_success(episode: dict[str, Any]) -> bool:
-    """A success is any episode whose outcome is ``accepted``.
+    """A success is any episode whose outcome is in
+    :data:`EPISODE_SUCCESS_STATES` (currently ``{"accepted"}``).
 
     The repository's four outcome states are accepted / reverted /
     blocked / error (see :class:`EpisodeRecord` in ``models.py``). Only
@@ -196,7 +218,7 @@ def _is_success(episode: dict[str, Any]) -> bool:
     else is a failure for patch-success-rate purposes.
     """
     outcome = str(episode.get("outcome", "")).lower()
-    return outcome == "accepted"
+    return outcome in EPISODE_SUCCESS_STATES
 
 
 def _load_task_history(runtime_dir: Path) -> list[dict[str, Any]]:
@@ -240,13 +262,13 @@ def _count_suggestion_tasks(history: Iterable[dict[str, Any]]) -> int:
 def _entry_outcome_success(entry: dict[str, Any]) -> bool:
     """True if a queue/history entry represents a successful task.
 
-    We accept either ``outcome == "success"`` (SC2 literal) or
-    ``outcome == "accepted"`` (the EpisodeRecord outcome that the queue
-    mirrors) — Phase 3 didn't fully unify the vocabulary, so both are
-    live in the fleet's on-disk artifacts.
+    Consumes :data:`TASK_HISTORY_SUCCESS_STATES`, which is broader than
+    :data:`EPISODE_SUCCESS_STATES` because the queue records both the
+    SC2-literal ``success`` value and the EpisodeRecord-mirrored
+    ``accepted`` value.
     """
     outcome = str(entry.get("outcome") or "").lower()
-    return outcome in {"success", "accepted"}
+    return outcome in TASK_HISTORY_SUCCESS_STATES
 
 
 def _entry_task_source(entry: dict[str, Any]) -> str:
@@ -260,9 +282,10 @@ def _count_candidates(models_dir: Path) -> tuple[int, int]:
     """Return ``(loras_trained, loras_merged)`` from ``registry.json``.
 
     ``loras_trained`` counts all candidate manifests ever registered;
-    ``loras_merged`` counts those whose status indicates they rolled
-    into a merge (``merged`` or ``promoted`` — registry vocabulary is
-    permissive, so we accept any status string that contains "merge").
+    ``loras_merged`` counts those whose status is in
+    :data:`MERGED_CANDIDATE_STATES` (exact match — substring matching
+    on ``"merge"`` would incorrectly count statuses such as
+    ``merge_pending`` or ``merge_failed``).
     """
     data = _read_json(models_dir / "registry.json")
     if not data:
@@ -276,7 +299,7 @@ def _count_candidates(models_dir: Path) -> tuple[int, int]:
         if not isinstance(item, dict):
             continue
         status = str(item.get("status") or "").lower()
-        if "merge" in status:
+        if status in MERGED_CANDIDATE_STATES:
             loras_merged += 1
     return loras_trained, loras_merged
 

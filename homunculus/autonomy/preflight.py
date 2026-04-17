@@ -327,9 +327,20 @@ def _gate_teacher_reachable(settings: HomunculusConfig) -> GateResult:
         with request.urlopen(req, timeout=_TEACHER_PING_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", 200)
     except error.HTTPError as exc:
-        # 4xx responses still mean the endpoint is reachable, so we
-        # only treat 5xx and auth failures as a gate failure.
-        if 400 <= exc.code < 500 and exc.code != 401 and exc.code != 403:
+        # Auth failures (401/403) are unambiguous gate failures.
+        # 404 means the URL path is wrong — the endpoint we configured
+        # does not exist on the server. That is a misconfiguration the
+        # operator must fix before launching, not a "reachable" state.
+        # Other 4xx responses (e.g. 400, 422, 429) still indicate the
+        # endpoint is alive and routing requests, so we treat them as
+        # pass-with-warning.
+        if exc.code in (401, 403, 404):
+            return GateResult(
+                name="teacher_reachable",
+                passed=False,
+                detail=f"Teacher responded HTTP {exc.code}.",
+            )
+        if 400 <= exc.code < 500:
             return GateResult(
                 name="teacher_reachable",
                 passed=True,

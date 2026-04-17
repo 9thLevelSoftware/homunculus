@@ -10,12 +10,14 @@ config contract is satisfied).
 
 ## Prerequisites
 
-1. Windows 10/11 with PowerShell 7+
+1. Windows 10/11 with PowerShell 7+ (`pwsh.exe` must be on PATH — `Get-Command pwsh.exe` should resolve; if missing, install from https://aka.ms/install-powershell and ensure the installer's PATH entry is checked)
 2. Python 3.11+ on PATH
 3. Git on PATH
 4. Clone this repo and install: `python -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install -e .`
 5. Run tests to confirm baseline: `python -m unittest discover -q` → expect `Ran 308+ tests ... OK`
 6. ~15 GB free disk (9 GB model + traces/models growth over 7 days)
+
+**After `setup.ps1`**: open a **new** PowerShell window before running `bootstrap.ps1` or `start-soak.ps1`. `setup.ps1` writes `OPENAI_API_KEY` at User scope via `[Environment]::SetEnvironmentVariable`; existing shells do not inherit the change until reopened.
 
 ## Execution Order
 
@@ -54,9 +56,21 @@ python -m homunculus.cli autonomy-accept `
 | `setup.ps1` | Verifies / starts Ollama, pulls teacher model, sets `OPENAI_API_KEY`, validates teacher reachability | Yes | 1-20 min (first pull ~9 GB) |
 | `bootstrap.ps1` | Runs seed tasks from `seed-tasks.json` via `homunculus.cli run-episode` on a throwaway branch | No — creates commits | 30-90 min (10 episodes × ~3-9 min each) |
 | `precheck.ps1` | Recomputes SOAK-PROTOCOL §2.2 throughput gate; exits 0 if gate clears | Yes | <1 s |
-| `start-soak.ps1` | Creates `phase-5/soak-YYYYMMDD` branch, runs preflight, captures baseline, starts daemon detached, registers Windows scheduled task for daily observation | No — side effects | 1-3 min |
-| `daily-observe.ps1` | Single-shot: dumps `autonomy-report --json` to next `soak-log/day-NN.json` and writes markdown diff | Yes | <10 s |
-| `stop-soak.ps1` | Signals daemon to stop gracefully, captures final state, unregisters daily schedule | Yes | <30 s |
+| `start-soak.ps1` | Creates `phase-5/soak-YYYYMMDD` branch, runs preflight, captures baseline, starts daemon detached (60s stability window), registers Windows scheduled tasks for daily-observe + Ollama watchdog. Idempotency-checks an already-running daemon. Accepts `-SkipPrecheck` / `-SkipPreflight` (audit-trailed). | No — side effects | 2-4 min |
+| `daily-observe.ps1` | Single-shot: dumps `autonomy-report --json` to next `soak-log/day-NN.json` and writes markdown diff. Asserts daemon liveness and disk-pressure threshold. | Yes | <10 s |
+| `ollama-watchdog.ps1` | Probes `http://127.0.0.1:11434/api/tags`; restarts `ollama serve` if down. Runs every 5 min via Task Scheduler. | Yes | <15 s |
+| `stop-soak.ps1` | Drops `runtime/STOP`, waits up to 120s for daemon to exit gracefully, falls back to Force-kill, unregisters BOTH scheduled tasks | Yes | <2 min |
+
+## Gate Bypass (operator override)
+
+`start-soak.ps1` accepts two explicit override flags:
+
+- `-SkipPrecheck`  - skip the SOAK-PROTOCOL throughput precheck
+- `-SkipPreflight` - skip `autonomy-preflight`
+
+Skipping gates is a deliberate override; the script writes
+`soak-log/gates-bypassed.json` with timestamp + reason. The acceptance report
+may cite this bypass in the SC evaluation. There is no generic `-Force` flag.
 
 ## Hardware Notes
 
@@ -82,6 +96,9 @@ python -m homunculus.cli autonomy-accept `
 | Preflight `teacher_reachable` fails | `ollama serve` not running | `scripts\phase5\setup.ps1` (re-starts serve) |
 | `projected_loras_merged_7d < 1.0` after bootstrap | Too few successful episodes | Re-run `bootstrap.ps1` with more tasks, OR further lower `[evolution]` thresholds in `homunculus.toml` |
 | Daemon crashed mid-soak | Check `runtime\worktrees\` for stale dirs, inspect `traces\events.jsonl` tail | Fix root cause, do NOT restart blindly — soak abort conditions in SOAK-PROTOCOL §7 apply |
+| `daemon.stdout.log` / `daemon.stderr.log` growing toward 1 GB+ | No automatic log rotation in Phase 5 | Mid-soak, manually truncate (NOT delete the open handle): `Clear-Content .planning\phases\05-full-autonomy\soak-log\daemon.stdout.log -Force`. If you must delete, daemon will keep writing to the deleted handle until restart — prefer Clear-Content. |
+| `daily-observe.md` shows `**DISK_PRESSURE**` header | Drive free space below 15% | Free space immediately. Abort condition #2 trips at <10%. Candidates: prune old `models/adapters/` dirs not in `registry.json` active pointer, prune old `runtime/worktrees/` (already cleaned per-episode but inspect), rotate logs as above. |
+| `daily-observe.md` shows `**ABORT_RECOMMENDED**` header | Daemon process not running at observation time | Inspect `daemon.stderr.log`, decide per SOAK-PROTOCOL §7 whether to restart (resets soak clock) or accept. |
 
 ## References
 

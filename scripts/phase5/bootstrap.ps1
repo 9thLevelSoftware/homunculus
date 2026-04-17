@@ -119,10 +119,8 @@ if (Test-Path $epPath) {
 }
 
 if ($ok -lt $MinSuccessful) {
-    Write-Host ""
-    Write-Warning "Bootstrap fell short: $ok successes < $MinSuccessful target."
-    Write-Warning "Re-run bootstrap.ps1 with additional seed tasks, OR lower thresholds further."
-    exit 2
+    Write-Error "Bootstrap produced $ok/$MinSuccessful successes. Re-run or expand seed-tasks.json before precheck."
+    exit 1
 }
 
 Write-Host ""

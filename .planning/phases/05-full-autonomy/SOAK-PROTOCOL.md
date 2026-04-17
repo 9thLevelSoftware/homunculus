@@ -278,6 +278,24 @@ The soak completes when **all** of:
 - Daemon is still running at the final report, OR it was explicitly aborted
   per §7 (in which case the soak FAILS, not COMPLETES).
 
+### SC5 prerequisite — minimum episode count
+
+SC5 (metrics stable) compares the first 50 vs last 50 episodes
+(`_TREND_WINDOW = 50` in `homunculus/autonomy/reporter.py`). If the soak
+produces **fewer than 100 episodes total**, `patch_success_rate_trend`
+returns `None` and SC5 fails closed.
+
+Rule of thumb:
+
+- `[daemon].cycle_interval_minutes = 480` × `max_episodes_per_cycle = 5`
+  × 21 cycles (7 days) ≈ **105 episodes** at saturation. Realistic
+  ≈ 60-80 because not every slot is filled.
+- If `precheck.json` shows `episodes_per_day < 14` (≈ 0.6/hour), expect
+  SC5 to fail. Either lower `cycle_interval_minutes` (e.g. 240 for 2×
+  rate), raise `max_episodes_per_cycle`, or extend soak to 14 days.
+- Operator should inspect `day-00-baseline.json` + expected throughput
+  BEFORE `start-soak.ps1` is run.
+
 At this point, stop collecting daily reports and proceed to 05-03-2.
 
 ---

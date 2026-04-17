@@ -210,17 +210,67 @@ class ReporterTests(unittest.TestCase):
             traces = Path(root) / "traces"
             models = Path(root) / "models"
             # First 50: 50% success. Last 50: 100% success.
-            # Trend should be > 0.
+            # Last window rate = 1.0, first window rate = 0.5 → exact trend +0.5.
             _write_episodes(traces, 50, successes=25, start_offset_minutes=60)
             _write_episodes(traces, 50, successes=50, start_offset_minutes=0)
 
             report = generate_report(runtime, traces, models)
 
             self.assertEqual(report.episodes_total, 100)
-            self.assertIsNotNone(report.patch_success_rate_trend)
-            # Last window rate == 1.0, first window rate == 0.5 → trend +0.5
             assert report.patch_success_rate_trend is not None
-            self.assertGreater(report.patch_success_rate_trend, 0.3)
+            # Strengthen from "is greater than 0.3" to the precise value
+            # that the spec defines (last_rate - first_rate). Approximate
+            # equality only because the underlying floats have the usual
+            # IEEE rounding artifacts.
+            self.assertAlmostEqual(
+                report.patch_success_rate_trend, 0.5, places=4,
+            )
+
+    def test_report_trend_negative_when_quality_degrades(self) -> None:
+        """Symmetric counterpart: first window rate=1.0, last=0.5 →
+        trend exactly -0.5. Locks the sign convention so a future
+        refactor cannot silently invert it."""
+        with tempfile.TemporaryDirectory() as root:
+            runtime = Path(root) / "runtime"
+            traces = Path(root) / "traces"
+            models = Path(root) / "models"
+            # First 50: 100% success. Last 50: 50% success.
+            _write_episodes(traces, 50, successes=50, start_offset_minutes=60)
+            _write_episodes(traces, 50, successes=25, start_offset_minutes=0)
+
+            report = generate_report(runtime, traces, models)
+
+            self.assertEqual(report.episodes_total, 100)
+            assert report.patch_success_rate_trend is not None
+            self.assertAlmostEqual(
+                report.patch_success_rate_trend, -0.5, places=4,
+            )
+
+    def test_reporter_keeps_records_missing_timestamp(self) -> None:
+        """Fail-open contract: a row missing the ``timestamp`` field
+        must still be counted by the reporter (a partial-write must not
+        silently erase the tail of the record).
+
+        This is the inverse of the precheck contract — precheck drops
+        timestamp-less rows because it filters by lookback window;
+        reporter aggregates without a window when ``since=None``."""
+        with tempfile.TemporaryDirectory() as root:
+            runtime = Path(root) / "runtime"
+            traces = Path(root) / "traces"
+            models = Path(root) / "models"
+            traces.mkdir(parents=True, exist_ok=True)
+            (traces / "episodes.jsonl").write_text(
+                json.dumps({
+                    "episode_id": "ep-no-ts",
+                    "task_id": "task-1",
+                    "outcome": "accepted",
+                    # no timestamp field
+                }) + "\n",
+                encoding="utf-8",
+            )
+            report = generate_report(runtime, traces, models)
+            self.assertEqual(report.episodes_total, 1)
+            self.assertEqual(report.episodes_success, 1)
 
     def test_report_trend_none_when_insufficient_episodes(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -252,8 +302,21 @@ class WatchdogTests(unittest.TestCase):
             w.tick({"status": "executed"})
             self.assertEqual(w.snapshot.consecutive_cycle_failures, 0)
 
-    def test_watchdog_persists_atomically(self) -> None:
-        """After every save(), the JSON file parses and no .tmp is left."""
+    def test_watchdog_persists_atomically_deterministic(self) -> None:
+        """Round-trip and atomic-write invariants over a deterministic
+        100-cycle alternating sequence.
+
+        This is NOT a property-based test — it walks a fixed
+        ``failed/executed`` alternation and asserts after every save:
+
+        * the file exists,
+        * the file parses as JSON and contains the expected schema key,
+        * no ``.tmp`` sidecar leaks (the atomic-rename pattern leaves
+          no temp residue on success).
+
+        For the genuine concurrent-writer hazard, see
+        :meth:`test_watchdog_concurrent_save_tolerates_race`.
+        """
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "watchdog.json"
             tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -267,6 +330,54 @@ class WatchdogTests(unittest.TestCase):
                 self.assertIn("consecutive_cycle_failures", data)
                 # Invariant 2: no leftover .tmp file.
                 self.assertFalse(tmp_path.exists())
+
+    def test_watchdog_concurrent_save_tolerates_race(self) -> None:
+        """Two threads each call save() many times against the same
+        watchdog file. Final state must be parseable and no .tmp sidecar
+        may leak.
+
+        The contract being verified: even though the watchdog is not
+        designed for multi-writer use, the atomic-rename persistence
+        pattern (write tmp, os.replace) must never leave a corrupt or
+        half-written file behind. This catches regressions where a
+        future refactor swaps in a non-atomic write.
+        """
+        import threading as _threading
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "watchdog.json"
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            w = Watchdog(path)
+            # Seed once on the main thread so both writers operate on a
+            # populated snapshot.
+            w.tick({"status": "failed"})
+            w.save()
+
+            errors: list[BaseException] = []
+
+            def hammer() -> None:
+                try:
+                    for _ in range(50):
+                        w.save()
+                except BaseException as exc:  # noqa: BLE001 — capture & re-raise
+                    errors.append(exc)
+
+            t1 = _threading.Thread(target=hammer)
+            t2 = _threading.Thread(target=hammer)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            self.assertEqual(errors, [], f"save() raised under contention: {errors}")
+            # Final invariants: file present, parseable, no tmp sidecar.
+            self.assertTrue(path.exists())
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIn("consecutive_cycle_failures", data)
+            self.assertFalse(
+                tmp_path.exists(),
+                f"Stale .tmp sidecar leaked at {tmp_path}",
+            )
 
     def test_watchdog_recovers_corrupted_json(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -482,6 +593,60 @@ class PreflightTests(unittest.TestCase):
                 "FAILED", result.gates["test_suite_passes"].detail
             )
 
+    def test_preflight_teacher_reachable_fails_on_404(self) -> None:
+        """A 404 response means the configured endpoint path is wrong.
+        That is a misconfiguration the operator must fix before launch,
+        not a 'reachable' state — so the gate must fail."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config_path = self._config_path(temp_path, repo_path)
+            settings = load_config(config_path)
+
+            def fake_run(cmd, **kwargs):
+                if cmd and cmd[0] == "git":
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=0, stdout="", stderr=""
+                    )
+                if any("unittest" in str(arg) for arg in cmd):
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=0, stdout="OK", stderr=""
+                    )
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0,
+                    stdout='{"ok": true, "failed": []}', stderr="",
+                )
+
+            from urllib.error import HTTPError
+
+            def raise_404(*args, **kwargs):
+                raise HTTPError(
+                    url="http://example.invalid/v1/chat/completions",
+                    code=404,
+                    msg="Not Found",
+                    hdrs=None,  # type: ignore[arg-type]
+                    fp=None,
+                )
+
+            with mock.patch(
+                "homunculus.autonomy.preflight.subprocess.run",
+                side_effect=fake_run,
+            ), mock.patch(
+                "homunculus.autonomy.preflight.request.urlopen",
+                side_effect=raise_404,
+            ), mock.patch.dict(
+                "os.environ", {settings.teacher.api_key_env: "test-token"}
+            ):
+                result = run_preflight(settings)
+
+            self.assertFalse(result.passed)
+            teacher_gate = result.gates["teacher_reachable"]
+            self.assertFalse(
+                teacher_gate.passed,
+                f"404 must fail the teacher_reachable gate; got: {teacher_gate.detail}",
+            )
+            self.assertIn("404", teacher_gate.detail)
+
 
 # ---------------------------------------------------------------------------
 # Acceptance tests
@@ -679,6 +844,29 @@ class AcceptanceTests(unittest.TestCase):
             sc6 = next(c for c in verdict.criteria if c.id == "SC6")
             self.assertFalse(sc6.passed)
             self.assertIn("lack", sc6.evidence)
+            self.assertIn("Foreign commits detected", sc6.evidence)
+
+    def test_check_metrics_stable_coverage_trend_none_branch(self) -> None:
+        """SC5 must pass when ``coverage_trend is None`` (no coverage
+        data yet) AND ``patch_success_rate_trend`` is within tolerance.
+
+        The contract: ``None`` for coverage_trend is treated as
+        'no data, do not penalize' rather than as a failure. This locks
+        the branch so future refactors cannot regress to penalizing
+        missing coverage.
+        """
+        from homunculus.autonomy.acceptance import _check_metrics_stable
+
+        report = _fixture_report(
+            psr_trend=-0.01,
+            coverage_trend=None,
+        )
+        result = _check_metrics_stable(report)
+        self.assertTrue(
+            result.passed,
+            f"SC5 should pass with cov=None and psr=-0.01: {result.evidence}",
+        )
+        self.assertEqual(result.id, "SC5")
 
     def test_acceptance_markdown_renders(self) -> None:
         """Markdown rendering includes overall verdict + all criteria."""
@@ -701,6 +889,86 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn("| SC1 |", md)
         self.assertIn("| SC6 |", md)
         self.assertIn("phase-5/soak", md)
+
+    # ----- SC6 real-git production-path tests ------------------------------
+
+    def test_sc6_classifies_agent_commits_as_passed(self) -> None:
+        """SC6 invoked directly on a repo whose only commits carry the
+        Episode-ID/Task-ID footer (the format
+        :meth:`TaskRunner.commit_to_source` produces) must pass.
+
+        This exercises the real ``git log`` shell-out and
+        :func:`_parse_git_log` parsing path that production runs hit —
+        not the in-memory ``AutonomyReport`` fixture path.
+        """
+        from homunculus.autonomy.acceptance import _check_no_human_intervention
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            repo = self._make_agent_repo(Path(temp_root), "phase-5/soak")
+            result = _check_no_human_intervention(repo, "phase-5/soak")
+            self.assertTrue(
+                result.passed,
+                f"SC6 should pass on all-agent repo: {result.evidence}",
+            )
+            self.assertEqual(result.id, "SC6")
+
+    def test_sc6_classifies_foreign_commits_as_failed(self) -> None:
+        """SC6 must fail when the soak branch contains a commit whose
+        message lacks the ``Episode-ID:`` footer — the production
+        signature for an operator-authored commit."""
+        from homunculus.autonomy.acceptance import _check_no_human_intervention
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            repo = self._make_agent_repo(Path(temp_root), "phase-5/soak")
+            # Add a foreign commit on the soak branch.
+            (repo / "f.py").write_text("# operator hotfix\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repo, capture_output=True, check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "chore: operator-only edit, no footer"],
+                cwd=repo, capture_output=True, check=True,
+            )
+            result = _check_no_human_intervention(repo, "phase-5/soak")
+            self.assertFalse(result.passed)
+            self.assertEqual(result.id, "SC6")
+
+    def test_sc6_evidence_includes_offending_shas(self) -> None:
+        """The SC6 failed-case evidence string must reference the
+        foreign commit SHA so an operator can ``git show`` it directly.
+
+        We assert a 7-character short SHA prefix (the format
+        ``acceptance.py`` emits) is present in evidence.
+        """
+        from homunculus.autonomy.acceptance import _check_no_human_intervention
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            repo = self._make_agent_repo(Path(temp_root), "phase-5/soak")
+            (repo / "f.py").write_text("# operator hotfix\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=repo, capture_output=True, check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "chore: operator hotfix"],
+                cwd=repo, capture_output=True, check=True,
+            )
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            short = head_sha[:7]
+
+            result = _check_no_human_intervention(repo, "phase-5/soak")
+            self.assertFalse(result.passed)
+            self.assertIn(
+                short, result.evidence,
+                f"Expected short SHA {short} in evidence: {result.evidence!r}",
+            )
+            # Diagnostic re-run command must be included for the operator.
+            self.assertIn("git log", result.evidence)
+            self.assertIn("Episode-ID", result.evidence)
 
     # ----- helpers ---------------------------------------------------------
 
@@ -786,15 +1054,58 @@ class DaemonWatchdogIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(persisted["consecutive_cycle_failures"], 3)
 
-            # Report picks up the flag.
+            # Report picks up the flag — exact format
+            # ``cycle_failure:<count>`` (see Watchdog.active_flags).
             report = generate_report(
                 runtime_dir=config.paths.runtime_dir,
                 traces_dir=config.paths.traces_dir,
                 models_dir=config.paths.models_dir,
             )
-            self.assertTrue(
+            self.assertIn(
+                "cycle_failure:3", report.watchdog_flags,
+                f"Expected cycle_failure:3 in {report.watchdog_flags}",
+            )
+
+    def test_watchdog_flag_clears_after_successful_cycle(self) -> None:
+        """A successful tick after 3 failures must clear the
+        ``cycle_failure:*`` flag from the next report.
+
+        The watchdog tick semantics (see :meth:`Watchdog.tick`): any
+        non-``failed``/``error`` status resets the consecutive counter
+        to zero. With the counter at zero, the flag derivation in
+        :func:`reporter._derive_flags` must not surface
+        ``cycle_failure:*``.
+        """
+        from homunculus.daemon import Daemon, DaemonCycleResult
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+
+            daemon = Daemon(config)
+            for _ in range(3):
+                daemon._finalize_cycle(
+                    DaemonCycleResult(status="failed")
+                )
+            # One successful cycle.
+            daemon._finalize_cycle(DaemonCycleResult(status="executed"))
+
+            persisted = json.loads(
+                (config.paths.runtime_dir / "watchdog.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(persisted["consecutive_cycle_failures"], 0)
+
+            report = generate_report(
+                runtime_dir=config.paths.runtime_dir,
+                traces_dir=config.paths.traces_dir,
+                models_dir=config.paths.models_dir,
+            )
+            self.assertFalse(
                 any(f.startswith("cycle_failure:") for f in report.watchdog_flags),
-                f"Expected cycle_failure flag in {report.watchdog_flags}",
+                f"Did not expect cycle_failure flag in {report.watchdog_flags}",
             )
 
 

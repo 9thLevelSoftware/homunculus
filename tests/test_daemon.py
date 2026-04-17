@@ -457,6 +457,75 @@ Test task that will fail
 
 
 @unittest.skipUnless(shutil.which("git"), "git is required")
+class StopFileTests(unittest.TestCase):
+    """Verify the runtime/STOP sentinel triggers graceful shutdown.
+
+    Stop-file is the third exit path (alongside SIGINT and SIGTERM) and
+    is the only one that works reliably on Windows where
+    ``Stop-Process`` does not deliver SIGINT to Python.
+    """
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_daemon_respects_stop_file(self) -> None:
+        """Daemon thread must exit cleanly within ~5s when STOP file appears.
+
+        Uses cycle_interval_minutes=0.001 (~60ms) so the daemon's
+        between-cycle ``Event.wait`` is short enough to observe the stop
+        signal quickly. Orchestrator is None → run_once() returns
+        idle status without launching a real episode.
+        """
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            repo_path = self._make_repo(temp_path)
+            config = load_config(self._config_path(temp_path, repo_path))
+            # Tiny interval keeps the test responsive without sleeping.
+            config.daemon.cycle_interval_minutes = 0.001
+
+            daemon = Daemon(config)
+            stop_path = daemon.stop_file_path
+            stop_path.parent.mkdir(parents=True, exist_ok=True)
+
+            thread = threading.Thread(target=daemon.run_continuous, daemon=True)
+            thread.start()
+
+            # Drop the stop-file. The next cycle (or current cycle's
+            # bottom-of-loop check) must observe it.
+            stop_path.write_text("", encoding="utf-8")
+
+            thread.join(timeout=5.0)
+            self.assertFalse(
+                thread.is_alive(),
+                "Daemon did not honor stop-file within 5s",
+            )
+            # The stop-file must be consumed so subsequent launches do
+            # not exit immediately on startup.
+            self.assertFalse(
+                stop_path.exists(),
+                f"Stop-file not consumed; still present at {stop_path}",
+            )
+            # State should have been saved.
+            self.assertTrue(daemon.state_path.exists())
+
+
+@unittest.skipUnless(shutil.which("git"), "git is required")
 class LockSafetyTests(unittest.TestCase):
     """Verify single-instance lock is robust against corrupt content and
     foreign-PID release."""

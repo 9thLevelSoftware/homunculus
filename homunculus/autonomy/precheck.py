@@ -17,14 +17,23 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..config import HomunculusConfig
+from .reporter import EPISODE_SUCCESS_STATES
 
 
 @dataclass(frozen=True)
 class ThroughputPrecheck:
     """Result of the throughput pre-check.
 
-    All projection fields are rounded to 4 decimal places for stable JSON
-    serialization; the verdict is derived from the unrounded ``projected_loras_merged_soak``.
+    Projection fields use the most natural type for the quantity:
+
+    * ``projected_successful_episodes_soak`` and
+      ``projected_loras_trained_soak`` are continuous quantities (rate
+      times time, divided by a sample threshold) and are rounded to 4
+      decimal places for stable JSON serialization.
+    * ``projected_loras_merged_soak`` is a discrete count — you cannot
+      complete a fractional merge — so the value is the integer floor
+      of (projected_loras_trained_soak / min_loras_for_merge). The
+      verdict is derived from this integer.
     """
 
     lookback_days: int
@@ -39,7 +48,7 @@ class ThroughputPrecheck:
     min_loras_for_merge: int
     projected_successful_episodes_soak: float
     projected_loras_trained_soak: float
-    projected_loras_merged_soak: float
+    projected_loras_merged_soak: int
     verdict: Literal["PASS", "BLOCK"]
     margin_note: Literal["OK", "below_safety_margin"]
 
@@ -105,7 +114,7 @@ def run_precheck(
     :param now: Injected clock for tests. Default: ``datetime.now(UTC)``.
 
     Uses the same success definition as ``reporter.py`` —
-    ``outcome == "accepted"`` per ``EpisodeRecord``.
+    :data:`EPISODE_SUCCESS_STATES`.
     """
     current = now or datetime.now(timezone.utc)
     window_start = current - timedelta(days=lookback_days)
@@ -125,7 +134,7 @@ def run_precheck(
             continue
         total += 1
         outcome = str(record.get("outcome", "")).lower()
-        if outcome == "accepted":
+        if outcome in EPISODE_SUCCESS_STATES:
             successful += 1
 
     evo = settings.evolution
@@ -136,7 +145,11 @@ def run_precheck(
     success_rate = (successful / total) if total else 0.0
     projected_successful_soak = episodes_per_day * soak_days * success_rate
     projected_loras_trained = projected_successful_soak / min_samples
-    projected_loras_merged = math.floor(projected_loras_trained) / min_loras
+    # Floor on the FINAL ratio. A fractional value here is meaningless: you
+    # cannot ship a fractional merge during a soak. Previously we floored
+    # the numerator before dividing, which produced misleading half-merge
+    # values (e.g. 7 trained / 2 = 3.5).
+    projected_loras_merged = math.floor(projected_loras_trained / min_loras)
 
     verdict: Literal["PASS", "BLOCK"] = (
         "PASS" if projected_loras_merged >= threshold_min else "BLOCK"
@@ -158,7 +171,7 @@ def run_precheck(
         min_loras_for_merge=min_loras,
         projected_successful_episodes_soak=round(projected_successful_soak, 4),
         projected_loras_trained_soak=round(projected_loras_trained, 4),
-        projected_loras_merged_soak=round(projected_loras_merged, 4),
+        projected_loras_merged_soak=int(projected_loras_merged),
         verdict=verdict,
         margin_note=margin_note,
     )

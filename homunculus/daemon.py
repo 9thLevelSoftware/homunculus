@@ -118,6 +118,48 @@ class Daemon:
     def lock_path(self) -> Path:
         return self.config.paths.runtime_dir / "daemon.pid"
 
+    @property
+    def stop_file_path(self) -> Path:
+        """Path to the stop-file sentinel.
+
+        Operator-side scripts (e.g. ``scripts/phase5/stop-soak.ps1``)
+        drop a file at this path to request a graceful shutdown on
+        Windows, where ``Stop-Process`` does not deliver SIGINT to
+        Python. The file is consumed (deleted) when the daemon honors
+        the request so the next launch does not exit immediately.
+        """
+        return self.config.paths.runtime_dir / "STOP"
+
+    def _check_stop_file(self) -> bool:
+        """Return True if the stop-file exists.
+
+        Stat-only check: never raises, never logs at debug level inside
+        the cycle hot-path. Missing file is the steady-state.
+        """
+        try:
+            return self.stop_file_path.exists()
+        except OSError:
+            return False
+
+    def _consume_stop_file(self) -> None:
+        """Delete the stop-file after honoring it.
+
+        Idempotent: missing or already-removed file is a no-op. We
+        catch ``OSError`` rather than the narrower ``FileNotFoundError``
+        because Windows can raise ``PermissionError`` if another process
+        has the file open at the moment of unlink.
+        """
+        try:
+            self.stop_file_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Could not remove stop-file at %s (%s); next launch may "
+                "exit immediately. Inspect and delete manually.",
+                self.stop_file_path, exc,
+            )
+
     def load_state(self) -> DaemonState:
         """Load daemon state from disk, or return fresh state if missing/corrupt."""
         if self.state_path.exists():
@@ -684,6 +726,14 @@ class Daemon:
         print("Press Ctrl+C to stop gracefully.")
 
         while not self.shutdown_requested:
+            # Stop-file check at top of cycle: an operator may have dropped
+            # the sentinel between our previous interval-wait and now.
+            # Honor it before doing more work.
+            if self._check_stop_file():
+                print("Stop-file detected; graceful shutdown requested.")
+                self._shutdown_event.set()
+                break
+
             # Increment BEFORE running the cycle so the introspection scheduler
             # sees a 1-indexed cycle number (cycle 0 is skipped by the scheduler
             # to avoid the modulo-zero edge case).
@@ -704,6 +754,14 @@ class Daemon:
                   f"{result.tasks_accepted} accepted, "
                   f"{result.tasks_reverted} reverted")
 
+            # Stop-file check at end of cycle: operator may have dropped
+            # the sentinel during the cycle. Honor it before sleeping so
+            # the daemon does not block on the interval wait.
+            if self._check_stop_file():
+                print("Stop-file detected; graceful shutdown requested.")
+                self._shutdown_event.set()
+                break
+
             if self.shutdown_requested:
                 break
 
@@ -712,6 +770,8 @@ class Daemon:
 
         # Final state save on shutdown
         self.save_state(state)
+        # Consume the stop-file (if any) so subsequent launches start fresh.
+        self._consume_stop_file()
         print(f"Daemon stopped. Final state: {state.cycles_completed} cycles, {state.total_episodes} episodes")
 
 

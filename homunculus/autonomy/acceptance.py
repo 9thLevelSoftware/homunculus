@@ -355,11 +355,20 @@ def _check_no_human_intervention(
             else f"No commits on {soak_branch}."
         )
     else:
-        first = human_commits[0]
+        # Surface the offending SHAs (up to 5, short form) directly in the
+        # evidence string so the operator can `git show <sha>` immediately.
+        # Also include the diagnostic `git log` invocation that re-derives
+        # the foreign-commit list — useful when the operator doesn't have
+        # the full report payload at hand.
+        sha_preview = ", ".join(c["sha"][:7] for c in human_commits[:5])
+        if len(human_commits) > 5:
+            sha_preview = f"{sha_preview}, ..."
         evidence = (
-            f"{len(human_commits)}/{total} commit(s) on {soak_branch} lack "
-            f"agent signature (e.g. {first['sha'][:8]} "
-            f"by {first['author']}: {first['subject'][:60]})."
+            f"Foreign commits detected (no Episode-ID footer) on "
+            f"{soak_branch}: {len(human_commits)}/{total} commit(s) lack "
+            f"agent signature: {sha_preview}. "
+            f"Re-run: git log {soak_branch} --pretty=%h%n%B | "
+            f"grep -B1 -L Episode-ID"
         )
     return CriterionResult(
         id="SC6",
