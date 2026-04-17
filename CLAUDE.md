@@ -65,6 +65,7 @@ python -m homunculus.cli train-sft --config homunculus.toml --simulate
 - `homunculus/policy.py` - Guardrail pattern matching (block/warn rules)
 - `homunculus/models.py` - Core dataclasses (EpisodeRecord, SFTSample, AdapterManifest, MergeManifest, LineageRecord, TaskQueueEntry, etc.)
 - `homunculus/daemon.py` - Continuous autonomous loop: introspection, task queue, `_check_evolution`
+- `homunculus/autonomy/sources.py` - SC2 source-name vocabulary (`SELF_DIRECTED_SOURCES`, `SUGGESTION_SOURCES`, `classify_source`)
 - `homunculus/introspection/` - Self-analysis modes (metrics, critique, coverage, comparative) + rotating scheduler
 - `homunculus/task_generator/` - Weakness → task synthesis, user-suggestion resonance scanner, prioritizer
 - `homunculus/evolution/merge.py` - LoRA → base merge via MLX (α/r-scaled) or mergekit (PEFT-baked checkpoints)
@@ -80,6 +81,7 @@ These are **intentional constraints**, not bugs:
 - Accepted patches are auto-committed to the source repo when `[daemon].auto_commit_on_accept = true` (default). Set to `false` to retain the manual `apply-episode` workflow — patch artifacts remain available either way.
 - Training only from immutable materialized snapshots
 - Candidate promotion is fully automated (the `require_human_approval` gate was removed in Phase 0); the promotion logic lives in `trainer/manager.promote_candidate`.
+- Guardrail regex is compiled at `load_config`. Invalid patterns crash the process at launch, not mid-episode. `GuardrailEngine` consumes `CompiledGuardrailRule` instances with `.regex` already compiled.
 
 ### Artifact Layout
 

@@ -1496,5 +1496,125 @@ class PreflightQueueReadyHardenedTests(unittest.TestCase):
         self.assertIn("1 recent introspection record", result.detail)
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class SignalFidelityIntegrationTests(unittest.TestCase):
+    """End-to-end: a full-cycle daemon run populates a realistic
+    task_history + watchdog.json, then generate_report returns
+    non-zero SC2 counts AND reflects the watchdog's revert signal.
+    This is the regression guard for all four Wave 1–4 fixes."""
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_full_cycle_populates_real_report_fields(self):
+        import json as _json
+        from homunculus.config import load_config
+        from homunculus.storage import ArtifactStore
+        from homunculus.daemon import Daemon
+        from homunculus.autonomy.reporter import generate_report
+        from homunculus.models import GeneratedTask, TaskQueueEntry, utc_now
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+            config.introspection.enabled = False
+            config.evolution.enabled = False
+
+            store = ArtifactStore(config)
+            store.ensure_layout()
+
+            # Seed three pending queue entries: two introspection-sourced
+            # (one will be accepted, one reverted) and one user-sourced
+            # (accepted). This isolates the cycle from the suggestion
+            # reader / introspection scheduler and exercises the exact
+            # vocabulary the B3 fix depends on.
+            specs = [
+                ("t-intro-ok", "introspection", "accepted"),
+                ("t-user-ok", "user", "accepted"),
+                ("t-intro-revert", "introspection", "reverted"),
+            ]
+            for task_id, source, _outcome in specs:
+                task = GeneratedTask(
+                    task_id=task_id,
+                    source=source,
+                    prompt=f"task {task_id}",
+                )
+                store.append_to_queue(TaskQueueEntry(
+                    task_id=task_id,
+                    task=task,
+                    queued_at=utc_now(),
+                    status="pending",
+                ))
+
+            # Map outcomes by task_id: the prioritizer reorders tasks by
+            # alignment score (introspection=1.0 beats user=0.5), so a
+            # positional side_effect list would misalign outcomes to
+            # tasks. Resolve by the TaskRequest.task_id instead — this
+            # is what actually identifies the dispatched task.
+            outcome_by_id = {tid: outcome for tid, _src, outcome in specs}
+
+            def _run_episode(task_request):
+                ep = MagicMock()
+                ep.outcome = outcome_by_id[task_request.task_id]
+                ep.episode_id = f"ep-{task_request.task_id}"
+                return ep
+
+            orchestrator = MagicMock()
+            orchestrator.run_episode.side_effect = _run_episode
+
+            daemon = Daemon(config, orchestrator=orchestrator, store=store)
+            result = daemon.run_once()
+
+            self.assertEqual(result.tasks_executed, 3, f"status={result.status} error={result.error}")
+            self.assertEqual(result.tasks_accepted, 2)
+            self.assertEqual(result.tasks_reverted, 1)
+
+            report = generate_report(
+                runtime_dir=config.paths.runtime_dir,
+                traces_dir=config.paths.traces_dir,
+                models_dir=config.paths.models_dir,
+            )
+            # B3: self-directed counts the introspection-accepted task.
+            self.assertEqual(
+                report.self_directed_tasks_completed, 1,
+                f"expected 1 self-directed accept; report={report!r}",
+            )
+            # B3: suggestion counts the user-accepted task.
+            self.assertEqual(
+                report.suggestion_tasks_completed, 1,
+                f"expected 1 suggestion accept; report={report!r}",
+            )
+            # T6: watchdog persisted a revert counter for t-intro-revert.
+            watchdog_path = config.paths.runtime_dir / "watchdog.json"
+            self.assertTrue(
+                watchdog_path.exists(),
+                "watchdog.json must persist after a reverted cycle",
+            )
+            snapshot = _json.loads(watchdog_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot.get("repeated_task_reverts", {}).get("t-intro-revert"),
+                1,
+                f"expected repeat counter=1 for t-intro-revert; "
+                f"snapshot={snapshot}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
