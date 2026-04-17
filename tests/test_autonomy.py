@@ -1308,5 +1308,34 @@ class ThroughputPrecheckTests(unittest.TestCase):
             self.assertEqual(payload["verdict"], "BLOCK")
 
 
+class AutonomySourcesVocabularyTests(unittest.TestCase):
+    """The SC2 source-name vocabulary is the contract between
+    producers (task_generator, suggestions) and the consumer
+    (reporter). Lock it here so any future rename breaks this test."""
+
+    def test_self_directed_matches_producer_emission(self):
+        from homunculus.autonomy.sources import (
+            SELF_DIRECTED_SOURCES,
+            SUGGESTION_SOURCES,
+            classify_source,
+        )
+        # Producers emit these literals today; see task_generator/generator.py
+        # (source="introspection") and suggestions.py (source="user").
+        self.assertIn("introspection", SELF_DIRECTED_SOURCES)
+        self.assertIn("continuation", SELF_DIRECTED_SOURCES)
+        self.assertIn("user", SUGGESTION_SOURCES)
+        # No overlap.
+        self.assertFalse(SELF_DIRECTED_SOURCES & SUGGESTION_SOURCES)
+
+    def test_classify_source_normalizes_case_and_whitespace(self):
+        from homunculus.autonomy.sources import classify_source
+        self.assertEqual(classify_source("Introspection"), "self_directed")
+        self.assertEqual(classify_source("  user  "), "suggestion")
+        self.assertEqual(classify_source("continuation"), "self_directed")
+        self.assertEqual(classify_source(""), "other")
+        self.assertEqual(classify_source(None), "other")
+        self.assertEqual(classify_source("unknown-source"), "other")
+
+
 if __name__ == "__main__":
     unittest.main()
