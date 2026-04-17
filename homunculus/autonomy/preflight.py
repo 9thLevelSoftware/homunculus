@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _TEST_SUITE_TIMEOUT_SECONDS = 300
 _GIT_TIMEOUT_SECONDS = 30
 _TEACHER_PING_TIMEOUT_SECONDS = 10
+_INTROSPECTION_TAIL_LINES = 200
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +297,11 @@ def _gate_task_queue_ready(settings: HomunculusConfig) -> GateResult:
         from ..task_generator import TaskGenerator  # local to avoid import cycles
         from ..models import IntrospectionResult
 
+        all_lines = introspection_path.read_text(encoding="utf-8").splitlines()
+        # Tail-limit: bounds parse cost as the append-only jsonl grows.
+        tail = all_lines[-_INTROSPECTION_TAIL_LINES:]
         results: list[IntrospectionResult] = []
-        for raw in introspection_path.read_text(encoding="utf-8").splitlines():
+        for raw in tail:
             line = raw.strip()
             if not line:
                 continue
@@ -332,7 +336,7 @@ def _gate_task_queue_ready(settings: HomunculusConfig) -> GateResult:
         passed=True,
         detail=(
             f"queue empty; generator can synthesize from "
-            f"{len(results)} introspection record(s) "
+            f"{len(results)} recent introspection record(s) "
             f"({len(synthesized)} dry-run task)."
         ),
     )

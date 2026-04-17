@@ -1469,6 +1469,32 @@ class PreflightQueueReadyHardenedTests(unittest.TestCase):
         self.assertTrue(result.passed, result.detail)
         self.assertIn("1 pending task", result.detail)
 
+    def test_malformed_introspection_row_is_skipped(self):
+        """Partial writes / corrupt JSONL rows must be tolerated — one
+        valid record downstream is enough to pass the gate."""
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        introspection_path = self.root / "traces" / "introspection.jsonl"
+        introspection_path.write_text(
+            # Truncated / invalid JSON on line 1 (simulates partial write).
+            '{"mode": "metrics", "finding'
+            "\n"
+            # Well-formed payload on line 2 — this is what the gate should
+            # count and feed to the generator.
+            '{"mode": "metrics",'
+            ' "timestamp": "2026-04-16T00:00:00+00:00",'
+            ' "findings": [{"type": "high_error_rate", "value": 0.5, "severity": "critical"}],'
+            ' "summary": "soak-seed",'
+            ' "metrics": {},'
+            ' "recommendations": []}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+        # Detail must report 1 usable record (not 2, not 0). The wording
+        # uses "recent introspection record(s)" after the tail-limit fix.
+        self.assertIn("1 recent introspection record", result.detail)
+
 
 if __name__ == "__main__":
     unittest.main()
