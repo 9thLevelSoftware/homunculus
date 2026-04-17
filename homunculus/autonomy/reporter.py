@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import AutonomyReport, WatchdogSnapshot
+from .sources import classify_source
 
 
 # Episode-trend window size: the last-N vs first-N comparison used for
@@ -231,30 +232,32 @@ def _load_task_history(runtime_dir: Path) -> list[dict[str, Any]]:
 
 
 def _count_self_directed(history: Iterable[dict[str, Any]]) -> int:
-    """Count successful tasks originating from the agent's own signals.
+    """Count successful tasks whose source classifies as self-directed.
 
-    Matches spec SC2: ``source in {generated, resonance}`` with
-    ``outcome == "success"``. The queue entry wraps the task, so we
-    look inside ``entry.task.source`` AND ``entry.outcome``.
+    Consumes :func:`homunculus.autonomy.sources.classify_source` so the
+    producer vocabulary is the single source of truth. B3 (2026-04-16)
+    surfaced when this function open-coded ``{"generated", "resonance"}``
+    which no producer emitted, silently zeroing SC2.
     """
     count = 0
     for entry in history:
         if not _entry_outcome_success(entry):
             continue
-        source = _entry_task_source(entry)
-        if source in {"generated", "resonance"}:
+        if classify_source(_entry_task_source(entry)) == "self_directed":
             count += 1
     return count
 
 
 def _count_suggestion_tasks(history: Iterable[dict[str, Any]]) -> int:
-    """Count successful suggestion-sourced tasks."""
+    """Count successful suggestion-sourced tasks.
+
+    See :func:`_count_self_directed` for the classification contract.
+    """
     count = 0
     for entry in history:
         if not _entry_outcome_success(entry):
             continue
-        source = _entry_task_source(entry)
-        if source == "suggestion":
+        if classify_source(_entry_task_source(entry)) == "suggestion":
             count += 1
     return count
 

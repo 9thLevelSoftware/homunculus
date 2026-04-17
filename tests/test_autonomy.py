@@ -99,7 +99,7 @@ def _write_task_history(
             "task_id": f"gen-{i}",
             "task": {
                 "task_id": f"gen-{i}",
-                "source": "generated",
+                "source": "introspection",
                 "prompt": "auto",
                 "priority": 0.5,
                 "introspection_mode": None,
@@ -121,7 +121,7 @@ def _write_task_history(
             "task_id": f"user-{i}",
             "task": {
                 "task_id": f"user-{i}",
-                "source": "suggestion",
+                "source": "user",
                 "prompt": "human",
                 "priority": 0.5,
                 "introspection_mode": None,
@@ -1335,6 +1335,55 @@ class AutonomySourcesVocabularyTests(unittest.TestCase):
         self.assertEqual(classify_source(""), "other")
         self.assertEqual(classify_source(None), "other")
         self.assertEqual(classify_source("unknown-source"), "other")
+
+
+class ReporterSourceHarmonizationTests(unittest.TestCase):
+    """B3 regression test — real producer literals must count."""
+
+    def _entry(self, source: str, outcome: str) -> dict:
+        return {
+            "task_id": f"t-{source}-{outcome}",
+            "outcome": outcome,
+            "task": {"source": source},
+        }
+
+    def test_introspection_task_counts_as_self_directed(self):
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [self._entry("introspection", "success")]
+        self.assertEqual(_count_self_directed(history), 1)
+
+    def test_continuation_task_counts_as_self_directed(self):
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [self._entry("continuation", "success")]
+        self.assertEqual(_count_self_directed(history), 1)
+
+    def test_user_task_counts_as_suggestion(self):
+        from homunculus.autonomy.reporter import _count_suggestion_tasks
+        history = [self._entry("user", "success")]
+        self.assertEqual(_count_suggestion_tasks(history), 1)
+
+    def test_failed_outcome_never_counts(self):
+        from homunculus.autonomy.reporter import (
+            _count_self_directed,
+            _count_suggestion_tasks,
+        )
+        history = [
+            self._entry("introspection", "error"),
+            self._entry("user", "blocked"),
+        ]
+        self.assertEqual(_count_self_directed(history), 0)
+        self.assertEqual(_count_suggestion_tasks(history), 0)
+
+    def test_legacy_literals_no_longer_counted(self):
+        """The old hardcoded ``generated`` / ``resonance`` literals were
+        never emitted by any producer. They must NOT be counted (they
+        were the B3 symptom; leaving them would mask the fix)."""
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [
+            self._entry("generated", "success"),
+            self._entry("resonance", "success"),
+        ]
+        self.assertEqual(_count_self_directed(history), 0)
 
 
 if __name__ == "__main__":
