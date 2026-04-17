@@ -125,6 +125,16 @@ Write-Host "=== Step 6: start daemon detached ===" -ForegroundColor Cyan
 $logOut = Join-Path $LogDir "daemon.stdout.log"
 $logErr = Join-Path $LogDir "daemon.stderr.log"
 $python = (Get-Command python).Source
+
+# BLOCKER c2-1: resolve runtime_dir the same way the daemon does, so stop-soak
+# writes STOP to the exact path the daemon polls. If homunculus.toml overrides
+# paths.runtime_dir, a relative "runtime" default in stop-soak would diverge.
+$runtimeDirResolved = (& python -c "import sys; from homunculus.config import load_config; cfg = load_config(r'$Config'); sys.stdout.write(str(cfg.paths.runtime_dir.resolve()))")
+if ($LASTEXITCODE -ne 0 -or -not $runtimeDirResolved) {
+    Write-Error "Could not resolve runtime_dir from $Config; aborting"
+    exit 1
+}
+Write-Host "[INFO] Daemon runtime_dir resolved to: $runtimeDirResolved" -ForegroundColor Cyan
 # Note: -WindowStyle Hidden omitted: when RedirectStandardOutput is set,
 # Start-Process already runs without a window. Specifying both has caused
 # native-launcher quirks on PS7; keep arg list lean.
@@ -154,6 +164,8 @@ $proc = @{
     stdout_log      = $logOut
     stderr_log      = $logErr
     soak_branch     = $soakBranch
+    runtime_dir     = $runtimeDirResolved                                 # BLOCKER c2-1
+    stop_file_path  = (Join-Path $runtimeDirResolved "STOP")              # BLOCKER c2-1
 }
 $proc | ConvertTo-Json | Set-Content -Path $processFile -Encoding UTF8
 Write-Host "[OK] Daemon PID $($daemon.Id) logging to $logOut / $logErr" -ForegroundColor Green
@@ -187,11 +199,14 @@ try {
     Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Principal $principal -Settings $settings -Description "Homunculus Phase 5 soak daily autonomy-report snapshot" | Out-Null
     Write-Host "[OK] Scheduled task '$taskName' registered (S4U, WakeToRun, StartWhenAvailable)" -ForegroundColor Green
 } catch {
+    # WARNING c2-2: prior fallback printed a schtasks /TR with broken backtick
+    # escaping. Dropping the exact-command advice (unreliable) and failing
+    # closed — the daily snapshot is required evidence for autonomy-accept.
     Write-Warning "Register-ScheduledTask (S4U) failed: $($_.Exception.Message)"
-    Write-Warning "Falling back to schtasks /Create with SYSTEM/user runtime..."
-    $schtasksCmd = "schtasks /Create /F /TN `"$taskName`" /SC DAILY /ST 09:00 /RL HIGHEST /RU `"$env:USERDOMAIN\$env:USERNAME`" /TR `"pwsh.exe -NoProfile -ExecutionPolicy Bypass -File `\`"$scriptPath`\`" -Config `\`"$Config`\`" -RepoDir `\`"$RepoDir`\`"`""
-    Write-Warning "If the above fails too, run this manually in an elevated shell:"
-    Write-Warning "  $schtasksCmd"
+    Write-Warning "This usually means admin elevation is required OR Group Policy blocks S4U registration."
+    Write-Warning "Fallback: open an elevated shell, re-run start-soak.ps1, OR create the task manually via Task Scheduler GUI per scripts/phase5/soak-log/SCHEDULING.md."
+    Write-Warning "DO NOT proceed without a scheduled task - the daily-observe script is required for soak evidence."
+    exit 1
 }
 
 # --- Ollama watchdog task (BLOCKER-4) ---
@@ -203,16 +218,24 @@ $wdTrigger      = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
 $wdAction       = New-ScheduledTaskAction -Execute $pwshCmd `
                     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdogScript`" -LogDir `"$LogDir`"" `
                     -WorkingDirectory $RepoDir
+# SUGGESTION c2-3: watchdog-only setting — if a prior trigger is still running
+# when the next 5-min tick fires, skip the new invocation instead of queuing.
+# Keeps probes non-overlapping without altering the daily-observe semantics.
+$watchdogSettings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
 $existingWd = Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue
 if ($existingWd) {
     Unregister-ScheduledTask -TaskName $watchdogName -Confirm:$false
 }
 try {
-    Register-ScheduledTask -TaskName $watchdogName -Trigger $wdTrigger -Action $wdAction -Principal $principal -Settings $settings -Description "Homunculus Phase 5 Ollama liveness watchdog (5-min interval)" | Out-Null
-    Write-Host "[OK] Scheduled task '$watchdogName' registered (5-min interval)" -ForegroundColor Green
+    Register-ScheduledTask -TaskName $watchdogName -Trigger $wdTrigger -Action $wdAction -Principal $principal -Settings $watchdogSettings -Description "Homunculus Phase 5 Ollama liveness watchdog (5-min interval)" | Out-Null
+    Write-Host "[OK] Scheduled task '$watchdogName' registered (5-min interval, IgnoreNew)" -ForegroundColor Green
 } catch {
+    # WARNING c2-2 (watchdog): same fail-closed treatment as daily-observe.
     Write-Warning "Register-ScheduledTask (S4U) failed for watchdog: $($_.Exception.Message)"
-    Write-Warning "Run manually: pwsh.exe -NoProfile -ExecutionPolicy Bypass -File `"$watchdogScript`""
+    Write-Warning "This usually means admin elevation is required OR Group Policy blocks S4U registration."
+    Write-Warning "Fallback: open an elevated shell, re-run start-soak.ps1, OR create the watchdog task manually via Task Scheduler GUI per scripts/phase5/soak-log/SCHEDULING.md."
+    Write-Warning "DO NOT proceed without the watchdog - Ollama liveness probes are required for soak evidence."
+    exit 1
 }
 
 Write-Host ""

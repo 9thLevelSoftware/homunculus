@@ -24,16 +24,16 @@ from .reporter import EPISODE_SUCCESS_STATES
 class ThroughputPrecheck:
     """Result of the throughput pre-check.
 
-    Projection fields use the most natural type for the quantity:
+    Projection fields use the most natural type for each quantity:
 
     * ``projected_successful_episodes_soak`` and
       ``projected_loras_trained_soak`` are continuous quantities (rate
-      times time, divided by a sample threshold) and are rounded to 4
+      times time, divided by a sample threshold); they are rounded to 4
       decimal places for stable JSON serialization.
     * ``projected_loras_merged_soak`` is a discrete count — you cannot
-      complete a fractional merge — so the value is the integer floor
-      of (projected_loras_trained_soak / min_loras_for_merge). The
-      verdict is derived from this integer.
+      complete a fractional merge — so it is emitted as ``int`` and
+      equals ``math.floor(projected_loras_trained_soak / min_loras_for_merge)``.
+      The ``verdict`` and ``margin_note`` are derived from this integer.
     """
 
     lookback_days: int

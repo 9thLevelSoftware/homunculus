@@ -148,6 +148,12 @@ class Daemon:
         catch ``OSError`` rather than the narrower ``FileNotFoundError``
         because Windows can raise ``PermissionError`` if another process
         has the file open at the moment of unlink.
+
+        Persistence across crash is intentional: if the daemon crashes
+        after :meth:`_check_stop_file` returns ``True`` but before this
+        method runs, the file survives and the next launch honors the
+        operator's stop intent by exiting cleanly on cycle 1 — no
+        episodes run, no state mutation. Fail-safe, not fail-silent.
         """
         try:
             self.stop_file_path.unlink()
