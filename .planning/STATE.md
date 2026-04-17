@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 5 of 5 (Full Autonomy) — partial (2/3 plans complete; 05-03 blocked at throughput gate)
-- **Status**: Phase 5 tooling landed — autonomy/ package + CLI + 308 tests passing. Soak run (05-03) BLOCKED at throughput pre-check: `traces/episodes.jsonl` empty → projected_loras_merged_7d=0.0 (below 1.0 floor). Operator must bootstrap episode history OR lower evolution thresholds before Session 1 restart.
-- **Last Activity**: Phase 5 build — Waves 1+2 complete, Wave 3 gate refusal (2026-04-16)
+- **Phase**: 5 of 5 (Full Autonomy) — review-passed for landed tooling; soak execution pending target-PC
+- **Status**: Phase 5 tooling + kickoff suite REVIEW-PASSED after 3 cycles (reality-checker PASS, senior-dev APPROVE, infra-maintainer PASS, evidence-collector PASS). 326 tests pass. See `.planning/phases/05-full-autonomy/05-REVIEW.md`. Overall phase completion still requires post-soak `autonomy-accept` sign-off in a future session.
+- **Last Activity**: Phase 5 /legion:review complete — 3 cycles, 20 findings resolved, 6 deferred (2026-04-16)
 
 ## Progress
 ```
-[###################.] 19/20 — Phase 0-4 complete; Phase 5: 05-01 + 05-02 landed, 05-03 blocked at throughput gate
+[####################] 20/20 planned artifacts — Phase 5 tooling + review done; soak execution pending target PC
 ```
 
 ## Completed Work
