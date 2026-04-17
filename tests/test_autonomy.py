@@ -451,6 +451,22 @@ class PreflightTests(unittest.TestCase):
             config_path = self._config_path(temp_path, repo_path)
             settings = load_config(config_path)
 
+            # Seed the introspection cache so task_queue_ready can
+            # dry-run the generator. Previously the gate passed
+            # tautologically on empty cache; after B4 it correctly
+            # fails closed without a real generator signal.
+            settings.paths.traces_dir.mkdir(parents=True, exist_ok=True)
+            (settings.paths.traces_dir / "introspection.jsonl").write_text(
+                '{"mode": "metrics",'
+                ' "timestamp": "2026-04-16T00:00:00+00:00",'
+                ' "findings": [{"type": "high_error_rate",'
+                ' "value": 0.5, "severity": "critical"}],'
+                ' "summary": "seed",'
+                ' "metrics": {},'
+                ' "recommendations": []}\n',
+                encoding="utf-8",
+            )
+
             # Distinguish subprocess callers by argv[0]:
             #   - git status --porcelain → empty stdout (clean)
             #   - doctor              → JSON OK
@@ -1384,6 +1400,74 @@ class ReporterSourceHarmonizationTests(unittest.TestCase):
             self._entry("resonance", "success"),
         ]
         self.assertEqual(_count_self_directed(history), 0)
+
+
+class PreflightQueueReadyHardenedTests(unittest.TestCase):
+    """B4 regression: empty queue + no fallback signal must fail."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "runtime").mkdir()
+        (self.root / "traces").mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _settings(self):
+        from pathlib import Path
+        from homunculus.config import load_config
+        source = Path("homunculus.example.toml").read_text(encoding="utf-8")
+        config_path = self.root / "config.toml"
+        config_path.write_text(
+            source.replace('path = "."', f'path = "{self.root.as_posix()}"', 1),
+            encoding="utf-8",
+        )
+        return load_config(config_path)
+
+    def test_empty_queue_and_empty_introspection_cache_fails(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertFalse(result.passed, result.detail)
+        self.assertIn("no pending tasks", result.detail.lower())
+
+    def test_empty_queue_but_introspection_cache_present_passes(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        introspection_path = self.root / "traces" / "introspection.jsonl"
+        # IntrospectionResult.from_dict uses cls(**payload), so all six
+        # dataclass fields (mode, timestamp, findings, summary, metrics,
+        # recommendations) must be present. The "metrics" mode with a
+        # critical high_error_rate finding is the confirmed-yielding
+        # shape (same pattern used by TaskGeneratorSourceContractTests
+        # in tests/test_task_generator.py).
+        introspection_path.write_text(
+            '{"mode": "metrics",'
+            ' "timestamp": "2026-04-16T00:00:00+00:00",'
+            ' "findings": [{"type": "high_error_rate", "value": 0.5,'
+            ' "severity": "critical"}],'
+            ' "summary": "soak-seed",'
+            ' "metrics": {},'
+            ' "recommendations": []}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+
+    def test_pending_queue_entry_passes(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        queue_path = self.root / "runtime" / "task_queue.jsonl"
+        queue_path.write_text(
+            '{"task_id":"x","status":"pending","task":{"source":"introspection","prompt":"p","task_id":"x"}}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+        self.assertIn("1 pending task", result.detail)
 
 
 if __name__ == "__main__":

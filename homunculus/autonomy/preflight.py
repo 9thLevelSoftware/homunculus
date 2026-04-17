@@ -237,14 +237,20 @@ def _gate_test_suite_passes(settings: HomunculusConfig) -> GateResult:
 
 
 def _gate_task_queue_ready(settings: HomunculusConfig) -> GateResult:
-    """Confirm the daemon has something to work on when it starts.
+    """Confirm the daemon has real work to pick up when it starts.
 
-    Passes if either:
-      - the persisted queue already has at least one pending entry, or
-      - the task generator can produce at least one task dry-run
-        (no introspection results needed — the generator returns []
-         on an empty input, which we treat as a soft-fail rather than
-         a hard fail because an empty queue is not always an error).
+    Passes when either:
+      * the persisted queue has at least one pending entry, OR
+      * the task generator can synthesize work from the introspection
+        cache on disk — i.e. ``traces/introspection.jsonl`` contains
+        at least one record AND the generator returns a non-empty
+        list when invoked against those records.
+
+    Previously this gate passed the moment ``TaskGenerator(store=None)``
+    could be constructed, which is a tautology: construction cannot
+    raise for valid settings. An empty queue + empty introspection
+    cache is NOT ready — it means the soak will idle for seven days
+    (audit B4, 2026-04-16).
     """
     queue_path = settings.paths.runtime_dir / "task_queue.jsonl"
     pending = 0
@@ -272,21 +278,63 @@ def _gate_task_queue_ready(settings: HomunculusConfig) -> GateResult:
             passed=True,
             detail=f"{pending} pending task(s) in queue.",
         )
-    # Dry-run: can the generator be constructed?
-    try:
-        from ..task_generator import TaskGenerator  # local to avoid import cycles
 
-        TaskGenerator(store=None)
-    except Exception as exc:  # noqa: BLE001 — gate must not raise
+    # Queue is empty — can the generator synthesize at least one task
+    # from the introspection cache on disk?
+    introspection_path = settings.paths.traces_dir / "introspection.jsonl"
+    if not introspection_path.exists():
         return GateResult(
             name="task_queue_ready",
             passed=False,
-            detail=f"TaskGenerator construction failed: {exc}",
+            detail=(
+                "no pending tasks and no introspection cache at "
+                f"{introspection_path}; soak would idle. Queue a manual "
+                "task or run introspection first."
+            ),
+        )
+    try:
+        from ..task_generator import TaskGenerator  # local to avoid import cycles
+        from ..models import IntrospectionResult
+
+        results: list[IntrospectionResult] = []
+        for raw in introspection_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            try:
+                results.append(IntrospectionResult.from_dict(payload))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        gen = TaskGenerator(store=None)
+        synthesized = gen.generate_from_introspection(results, max_tasks=1)
+    except Exception as exc:  # noqa: BLE001 — gate must never raise
+        return GateResult(
+            name="task_queue_ready",
+            passed=False,
+            detail=f"generator dry-run failed: {exc}",
+        )
+    if not synthesized:
+        return GateResult(
+            name="task_queue_ready",
+            passed=False,
+            detail=(
+                "no pending tasks and generator yielded 0 tasks from "
+                f"{len(results)} introspection record(s); soak would idle."
+            ),
         )
     return GateResult(
         name="task_queue_ready",
         passed=True,
-        detail="Queue empty; generator available to synthesize work.",
+        detail=(
+            f"queue empty; generator can synthesize from "
+            f"{len(results)} introspection record(s) "
+            f"({len(synthesized)} dry-run task)."
+        ),
     )
 
 
