@@ -39,12 +39,15 @@ REQUIRED_FILES = [
     "AGENTS.md",
     "CLAUDE.md",
     "README.md",
+    "WORKFLOW.md",
     "docs/index.md",
     "docs/harness-engineering.md",
     "docs/architecture.md",
     "docs/operator-guide.md",
     "docs/setup-and-configuration.md",
     "docs/quality-score.md",
+    "docs/symphony-autonomy.md",
+    "docs/vm-runbook.md",
     "homunculus.example.toml",
     ".github/workflows/harness.yml",
 ]
@@ -55,6 +58,8 @@ INDEXED_DOCS = [
     "operator-guide.md",
     "setup-and-configuration.md",
     "quality-score.md",
+    "symphony-autonomy.md",
+    "vm-runbook.md",
 ]
 
 STALE_GUIDANCE = [
@@ -76,6 +81,8 @@ TEXT_SURFACES = [
     "docs/architecture.md",
     "docs/operator-guide.md",
     "docs/setup-and-configuration.md",
+    "docs/symphony-autonomy.md",
+    "docs/vm-runbook.md",
     "docs/quality-score.md",
 ]
 
@@ -87,6 +94,7 @@ def run_harness_check(root: str | Path = ".", *, strict: bool = False) -> Harnes
         _check_agents_map(root_path),
         _check_doc_index(root_path),
         _check_autonomous_defaults(root_path),
+        _check_workflow_contract(root_path),
         _check_ci_workflow(root_path),
     ]
     stale_check = (
@@ -219,6 +227,32 @@ def _check_autonomous_defaults(root: Path) -> HarnessCheck:
         "autonomous-defaults",
         True,
         f"autonomous defaults explicit in {names}",
+    )
+
+
+def _check_workflow_contract(root: Path) -> HarnessCheck:
+    path = root / "WORKFLOW.md"
+    if not path.exists():
+        return HarnessCheck("workflow-contract", False, "WORKFLOW.md is missing")
+    try:
+        from .symphony.workflow import load_workflow
+
+        config = load_workflow(path)
+    except Exception as exc:
+        return HarnessCheck("workflow-contract", False, f"WORKFLOW.md parse failed: {exc}")
+    required = [
+        config.tracker.kind,
+        config.tracker.project_slug,
+        config.prompt_template,
+        str(config.workspace.root),
+        str(config.homunculus.config_path),
+    ]
+    if not all(required):
+        return HarnessCheck("workflow-contract", False, "WORKFLOW.md is missing required fields")
+    return HarnessCheck(
+        "workflow-contract",
+        True,
+        "WORKFLOW.md parses and declares tracker/workspace/runner contract",
     )
 
 

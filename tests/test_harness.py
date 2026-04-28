@@ -82,6 +82,8 @@ class HarnessCheckTests(unittest.TestCase):
                     "architecture.md",
                     "operator-guide.md",
                     "setup-and-configuration.md",
+                    "symphony-autonomy.md",
+                    "vm-runbook.md",
                     "quality-score.md",
                 ]
             ),
@@ -92,6 +94,8 @@ class HarnessCheckTests(unittest.TestCase):
             "architecture.md",
             "operator-guide.md",
             "setup-and-configuration.md",
+            "symphony-autonomy.md",
+            "vm-runbook.md",
             "quality-score.md",
         ]:
             (root / "docs" / name).write_text("ok\n", encoding="utf-8")
@@ -106,6 +110,23 @@ auto_promote = true
 auto_apply = true
 """.strip()
             + "\n",
+            encoding="utf-8",
+        )
+        workflow = root / "WORKFLOW.md"
+        workflow.write_text(
+            f"""---
+tracker:
+  kind: linear
+  api_key: "$LINEAR_API_KEY"
+  project_slug: test-project
+workspace:
+  root: runtime/symphony_workspaces
+homunculus:
+  config_path: {(root / 'homunculus.example.toml').as_posix()}
+  source_workspace: {root.as_posix()}
+---
+Issue {{{{ issue.identifier }}}}
+""",
             encoding="utf-8",
         )
         (root / ".github" / "workflows" / "harness.yml").write_text(

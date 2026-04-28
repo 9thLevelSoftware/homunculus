@@ -25,10 +25,33 @@ The example config expects:
 ```powershell
 $env:OPENAI_API_KEY = "..."
 $env:ENGRAM_MCP_BEARER_TOKEN = "..."
+$env:LINEAR_API_KEY = "..."
 ```
 
 For local Ollama-style endpoints, `OPENAI_API_KEY` can be any non-empty value if
 the endpoint ignores bearer auth.
+
+`LINEAR_API_KEY` is required only for Symphony dispatch against Linear. Static
+workflow parsing and harness checks do not require it.
+
+## Symphony Workflow
+
+`WORKFLOW.md` configures Linear orchestration separately from
+`homunculus.toml`. It contains YAML front matter for tracker, workspace, hooks,
+agent, Codex, and Homunculus-specific merge policy, followed by the issue prompt
+template.
+
+Validate it with:
+
+```powershell
+python -m homunculus.cli symphony-check --workflow WORKFLOW.md
+```
+
+Run one cycle with:
+
+```powershell
+python -m homunculus.cli symphony-run --workflow WORKFLOW.md --once
+```
 
 ## Config File
 

@@ -17,6 +17,10 @@ from .config import load_config
 from .harness import format_harness_report, run_harness_check
 from .models import EvaluationMetrics, TaskRequest
 from .runtime import build_runtime
+from .symphony import load_workflow
+from .symphony.orchestrator import SymphonyOrchestrator
+from .symphony.status import load_symphony_status
+from .symphony.tracker import LinearTracker
 from .task_runner.runner import WorkspacePreflightError
 
 
@@ -267,6 +271,55 @@ def cmd_autonomy_accept(args: argparse.Namespace) -> int:
     return 0 if verdict.overall == "PASS" else 1
 
 
+def cmd_symphony_check(args: argparse.Namespace) -> int:
+    config = load_workflow(args.workflow)
+    payload = {
+        "ok": True,
+        "workflow": str(config.workflow_path),
+        "dispatch_ready": not config.dispatch_ready_errors(),
+        "dispatch_errors": config.dispatch_ready_errors(),
+        "config": config.to_dict(),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"workflow: {payload['workflow']}")
+        print(f"ok: {str(payload['ok']).lower()}")
+        print(f"dispatch_ready: {str(payload['dispatch_ready']).lower()}")
+        for error in payload["dispatch_errors"]:
+            print(f"warning: {error}")
+    return 0
+
+
+def cmd_symphony_run(args: argparse.Namespace) -> int:
+    config = load_workflow(args.workflow)
+    errors = config.dispatch_ready_errors()
+    if errors:
+        print(json.dumps({"ok": False, "dispatch_errors": errors}, indent=2))
+        return 1
+    tracker = LinearTracker(config.tracker)
+    orchestrator = SymphonyOrchestrator(config, tracker)
+    if args.once:
+        result = orchestrator.run_once()
+        print(json.dumps(result, indent=2))
+        return 0
+    orchestrator.run_forever()
+    return 0
+
+
+def cmd_symphony_status(args: argparse.Namespace) -> int:
+    payload = load_symphony_status(args.runtime_dir, limit=args.limit)
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        state = payload["state"]
+        print(f"runtime_dir: {payload['runtime_dir']}")
+        print(f"claimed: {len(state.get('claimed', {}))}")
+        print(f"retrying: {len(state.get('retry_attempts', {}))}")
+        print(f"recent_runs: {len(payload['recent_runs'])}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="homunculus")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -367,6 +420,22 @@ def main() -> int:
     accept_parser.add_argument("--output", required=True)
     accept_parser.add_argument("--soak-branch", required=True)
     accept_parser.set_defaults(func=cmd_autonomy_accept)
+
+    symphony_check = subparsers.add_parser("symphony-check")
+    symphony_check.add_argument("--workflow", default="WORKFLOW.md")
+    symphony_check.add_argument("--json", action="store_true")
+    symphony_check.set_defaults(func=cmd_symphony_check)
+
+    symphony_run = subparsers.add_parser("symphony-run")
+    symphony_run.add_argument("--workflow", default="WORKFLOW.md")
+    symphony_run.add_argument("--once", action="store_true")
+    symphony_run.set_defaults(func=cmd_symphony_run)
+
+    symphony_status = subparsers.add_parser("symphony-status")
+    symphony_status.add_argument("--runtime-dir", default="runtime")
+    symphony_status.add_argument("--limit", type=int, default=20)
+    symphony_status.add_argument("--json", action="store_true")
+    symphony_status.set_defaults(func=cmd_symphony_status)
 
     args = parser.parse_args()
     return args.func(args)

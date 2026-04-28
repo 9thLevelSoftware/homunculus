@@ -55,6 +55,30 @@ python -m homunculus.daemon --config homunculus.toml
 The daemon reads suggestions, introspection results, and persisted queue entries,
 then dispatches up to `daemon.max_episodes_per_cycle` tasks per cycle.
 
+## Running Symphony
+
+Validate the repository-owned workflow contract:
+
+```powershell
+python -m homunculus.cli symphony-check --workflow WORKFLOW.md
+```
+
+Run one Linear dispatch cycle:
+
+```powershell
+python -m homunculus.cli symphony-run --workflow WORKFLOW.md --once
+```
+
+Run continuously:
+
+```powershell
+python -m homunculus.cli symphony-run --workflow WORKFLOW.md
+```
+
+Symphony requires `LINEAR_API_KEY` for dispatch. Runnable Linear issues must be
+in the `Homunculus Autonomy` project, carry the `symphony` label, and be in an
+active state configured in `WORKFLOW.md`.
+
 ## Observability
 
 Use reports before reading raw artifacts:
@@ -72,6 +96,9 @@ Raw artifacts:
 - `runtime/task_queue.jsonl` - pending/in-flight daemon tasks
 - `runtime/task_history.jsonl` - archived terminal tasks
 - `runtime/watchdog.json` - advisory failure counters
+- `runtime/symphony_state.json` - claimed Linear issues and retry state
+- `runtime/symphony_runs.jsonl` - terminal Symphony run attempts
+- `runtime/symphony_logs/` - structured per-issue Symphony logs
 - `models/registry.json` - candidate manifests and active pointer
 
 ## Acceptance
@@ -112,4 +139,7 @@ verification commands in source, and reverts on verification failure.
   before deleting anything.
 - Merge failures: inspect `traces/merges.jsonl`, `traces/lineage.jsonl`, and
   generated investigation tasks.
+- Symphony retry loop: inspect `runtime/symphony_state.json`,
+  `runtime/symphony_runs.jsonl`, and the issue log under
+  `runtime/symphony_logs/`.
 - No training snapshot: ensure seed data and valid/test splits exist before SFT.

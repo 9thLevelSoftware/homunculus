@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
+import threading
 from dataclasses import replace as _dc_replace  # noqa: F401 — kept for future
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +38,8 @@ class Watchdog:
     snapshot — callers who need a durable read after an external writer
     must call :meth:`load` first.
     """
+
+    _save_lock = threading.Lock()
 
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path
@@ -97,25 +101,29 @@ class Watchdog:
         to prepare ``runtime/`` ahead of time.
         """
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         payload = self._snapshot.to_dict()
-        try:
-            tmp_path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=True),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, self.state_path)
-        except OSError as exc:
-            logger.warning(
-                "Failed to persist watchdog state to %s: %s", self.state_path, exc,
-            )
-            # Clean up the temp file on failure — we don't want a
-            # dangling *.tmp file confusing future reads.
+        tmp_path: str | None = None
+        with type(self)._save_lock:
             try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=self.state_path.parent,
+                    prefix=".watchdog_",
+                    suffix=".tmp",
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, indent=2, ensure_ascii=True))
+                os.replace(tmp_path, self.state_path)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to persist watchdog state to %s: %s", self.state_path, exc,
+                )
+                # Clean up the temp file on failure — we don't want a
+                # dangling *.tmp file confusing future reads.
+                try:
+                    if tmp_path and Path(tmp_path).exists():
+                        Path(tmp_path).unlink()
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # Mutations

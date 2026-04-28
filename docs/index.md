@@ -13,6 +13,10 @@ This directory is the repository-local source of truth for agents and operators.
   recovery, and acceptance.
 - [Setup and Configuration](setup-and-configuration.md) - TOML sections,
   environment variables, launch checks, and common setup mistakes.
+- [Symphony Autonomy](symphony-autonomy.md) - Linear-driven Symphony runtime,
+  workspaces, branches, merge gates, and persisted state.
+- [VM Runbook](vm-runbook.md) - Ubuntu GPU VM, Ollama, Codex profile, smoke, and
+  soak operating steps.
 - [Quality Score](quality-score.md) - current grades, gaps, and cleanup cadence.
 
 ## Planning Artifacts

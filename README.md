@@ -4,6 +4,9 @@
 self-improving coding agent. It runs tasks against its own repository, verifies
 candidate patches in isolated git worktrees, commits accepted changes, curates
 successful episodes into training data, and evolves local LoRA adapters.
+It also includes a Python Symphony layer that polls Linear, creates persistent
+per-issue task branches, runs agents, and fast-forwards the source branch only
+after configured gates pass.
 
 The repository is also the harness: docs, checks, traces, scripts, and tests are
 kept local so future agent runs can inspect and improve the system directly.
@@ -25,6 +28,8 @@ kept local so future agent runs can inspect and improve the system directly.
 - [Architecture and Artifacts](docs/architecture.md)
 - [Operator Guide](docs/operator-guide.md)
 - [Setup and Configuration](docs/setup-and-configuration.md)
+- [Symphony Autonomy](docs/symphony-autonomy.md)
+- [VM Runbook](docs/vm-runbook.md)
 - [Quality Score](docs/quality-score.md)
 
 ## Install
@@ -62,6 +67,11 @@ python -m homunculus.daemon --config homunculus.toml --once
 # Run continuously and inspect autonomy state
 python -m homunculus.daemon --config homunculus.toml
 python -m homunculus.cli autonomy-report --config homunculus.toml --json
+
+# Validate and run Linear/Symphony orchestration
+python -m homunculus.cli symphony-check --workflow WORKFLOW.md
+python -m homunculus.cli symphony-run --workflow WORKFLOW.md --once
+python -m homunculus.cli symphony-status --json
 ```
 
 ## Episode Lifecycle
@@ -94,7 +104,6 @@ test doubles. It requires Git to be available on `PATH`.
 
 ## Status
 
-Phase 5 autonomy tooling is present: daemon operation, introspection, generated
-tasks, auto-commit, candidate promotion, merge validation, preflight, reporting,
-and acceptance predicates. The next operational milestone is completing a real
-soak run and archiving the acceptance evidence.
+Phase 5 autonomy tooling is present, and Symphony orchestration is now wired for
+Linear-driven issue execution. The next operational milestone is a VM smoke run,
+then a 24-hour soak, then a 7-day acceptance run with archived evidence.

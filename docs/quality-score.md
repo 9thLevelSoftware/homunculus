@@ -7,15 +7,14 @@ change materially improves or regresses an area.
 | --- | --- | --- | --- |
 | Agent map | B | Short `AGENTS.md` exists and points to current docs. | Keep under 120 lines and avoid duplicated manuals. |
 | Architecture legibility | B | `architecture.md` maps lifecycle, modules, artifacts, and boundaries. | Add mechanical dependency-boundary checks if package edges grow. |
-| Autonomous loop | B+ | Daemon, introspection, task generation, auto-commit, promotion, merge, and acceptance surfaces exist. | Exercise a full soak and archive acceptance evidence. |
-| Mechanical enforcement | B | `harness-check`, unit tests, and CI workflow define baseline checks. | Add richer structural checks for import boundaries and artifact hygiene. |
-| Operator experience | B- | Phase 5 scripts and CLI reports exist. | Reduce noisy watchdog warnings in test output and document recovery paths more tightly. |
+| Autonomous loop | A- | Daemon plus Symphony Linear dispatch, persistent workspaces, branch gates, promotion, merge, and acceptance surfaces exist. | Exercise VM smoke, 24-hour soak, then 7-day acceptance. |
+| Mechanical enforcement | B+ | `harness-check`, unit tests, CI workflow, and `WORKFLOW.md` parsing define baseline checks. | Add richer structural checks for import boundaries and artifact hygiene. |
+| Operator experience | B | Phase 5 scripts, CLI reports, Symphony status, and VM runbook exist. | Prove local Codex app-server profile against the VM Ollama endpoint. |
 | Documentation freshness | B- | Current docs are indexed and stale manual-gate language is checked. | Continue pruning duplicated historical guidance from `.planning/` and older runbooks. |
 
 ## Current Cleanup Queue
 
-- Reduce noisy watchdog persistence warnings during unit tests without hiding real
-  runtime failures.
+- Complete a VM Codex app-server smoke against the `homunculus-local` profile.
 - Add a remote-backed PR publication command only after a git remote and `gh`
   authentication are available.
 - Promote recurring doc-gardening from a documented process into a generated

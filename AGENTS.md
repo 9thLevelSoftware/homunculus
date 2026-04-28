@@ -17,6 +17,8 @@ episodes into training data.
 - `docs/architecture.md` - implemented runtime architecture and data flow
 - `docs/operator-guide.md` - day-to-day commands and autonomous runbooks
 - `docs/setup-and-configuration.md` - config reference and launch checklist
+- `docs/symphony-autonomy.md` - Linear/Symphony orchestration contract
+- `docs/vm-runbook.md` - Ubuntu GPU VM and local model runbook
 - `docs/quality-score.md` - current quality grades and cleanup targets
 
 Historical planning artifacts live in `.planning/`. Treat them as audit history
@@ -34,6 +36,8 @@ python -m homunculus.daemon --config homunculus.toml --once
 python -m homunculus.daemon --config homunculus.toml
 python -m homunculus.cli autonomy-report --config homunculus.toml --json
 python -m homunculus.cli autonomy-accept --config homunculus.toml --soak-branch <branch> --output <path>
+python -m homunculus.cli symphony-check --workflow WORKFLOW.md
+python -m homunculus.cli symphony-run --workflow WORKFLOW.md --once
 ```
 
 ## Operating Model
@@ -58,6 +62,7 @@ python -m homunculus.cli autonomy-accept --config homunculus.toml --soak-branch 
 - `homunculus/trainer/manager.py` - SFT, evaluation, promotion, merge orchestration
 - `homunculus/evolution/` - LoRA merge, validation, lineage
 - `homunculus/autonomy/` - preflight, precheck, reporting, acceptance, watchdog
+- `homunculus/symphony/` - Linear workflow, workspaces, branch gates, status
 - `homunculus/storage.py` - append-only artifacts and registry persistence
 
 ## Change Discipline

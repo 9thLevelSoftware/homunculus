@@ -9,6 +9,9 @@ This document describes the runtime design the current code implements.
   `harness-check`.
 - **Daemon:** `homunculus/daemon.py` runs continuous cycles, dispatches tasks,
   archives terminal work, updates watchdog state, and triggers evolution.
+- **Symphony:** `homunculus/symphony/` reads `WORKFLOW.md`, polls Linear,
+  creates persistent per-issue git worktrees, runs an agent, gates task
+  branches, and records orchestration state.
 - **Orchestrator:** `homunculus/orchestrator/loop.py` owns the episode lifecycle:
   `assess -> preflight -> recall -> plan -> execute -> reflect -> curate`.
 - **Task runner:** `homunculus/task_runner/runner.py` enforces clean workspaces,
@@ -96,6 +99,10 @@ runtime/
   worktrees/<episode_id>/
   daemon_state.json
   daemon.pid
+  symphony_state.json
+  symphony_runs.jsonl
+  symphony_logs/
+  symphony_workspaces/<issue_key>/
   task_queue.jsonl
   task_history.jsonl
   watchdog.json
@@ -107,6 +114,8 @@ runtime/
 - Candidate patches are verified in isolated linked worktrees before source
   mutation.
 - Source commits happen only for accepted episodes when auto-commit is enabled.
+- Symphony production work lands on `codex/<issue>` branches and reaches the
+  source workspace only through configured merge gates.
 - Training reads immutable snapshots, not mutable live dataset tails.
 - Promotion is automated but still gated by metrics and snapshot existence.
 - Merge advancement requires validation; failed merges produce investigation
