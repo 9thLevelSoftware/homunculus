@@ -1,143 +1,71 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+Short map for agents working in this repository. Keep this file concise; the
+source of truth lives in `docs/`.
 
 ## What This Is
 
-A teacher-student self-improving coding agent scaffold. Runs episodes where a teacher model generates patches, a local student provides hints, and verification determines acceptance. Training data is curated from successful episodes.
+`homunculus` is a teacher-student self-improving coding agent scaffold. It runs
+episodes against its own repository, verifies candidate patches in isolated git
+worktrees, auto-commits accepted changes when configured, and curates successful
+episodes into training data.
 
-## Commands
+## Read First
+
+- `docs/index.md` - documentation map and freshness rules
+- `docs/harness-engineering.md` - repo-local harness standard
+- `docs/architecture.md` - implemented runtime architecture and data flow
+- `docs/operator-guide.md` - day-to-day commands and autonomous runbooks
+- `docs/setup-and-configuration.md` - config reference and launch checklist
+- `docs/quality-score.md` - current quality grades and cleanup targets
+
+Historical planning artifacts live in `.planning/`. Treat them as audit history
+unless a current doc links to a specific file as active guidance.
+
+## Core Commands
 
 ```powershell
-# Install (editable mode)
-python -m venv .venv && .venv/Scripts/Activate.ps1
 python -m pip install -e .
-
-# Run tests
-python -m unittest discover -v
-
-# Run a single test file
-python -m unittest tests.test_orchestrator -v
-
-# Run a specific test
-python -m unittest tests.test_orchestrator.OrchestratorTests.test_run_episode_persists_patch_and_keeps_source_clean -v
-
-# Initialize artifact directories
-python -m homunculus.cli init-artifacts --config homunculus.toml
-
-# Check environment readiness
+python -m unittest discover -q
+python -m homunculus.cli harness-check --strict
 python -m homunculus.cli doctor --config homunculus.toml
-
-# Run an episode
-python -m homunculus.cli run-episode --config homunculus.toml --workspace self --task-id <task-id> --prompt "..."
-
-# Apply a verified patch to source repo
-python -m homunculus.cli apply-episode --config homunculus.toml --episode-id <episode-id>
-
-# Train SFT (--simulate for dry run)
-python -m homunculus.cli train-sft --config homunculus.toml --simulate
+python -m homunculus.cli autonomy-preflight --config homunculus.toml
+python -m homunculus.daemon --config homunculus.toml --once
+python -m homunculus.daemon --config homunculus.toml
+python -m homunculus.cli autonomy-report --config homunculus.toml --json
+python -m homunculus.cli autonomy-accept --config homunculus.toml --soak-branch <branch> --output <path>
 ```
 
-## Architecture
+## Operating Model
 
-### Episode Lifecycle
+- Autonomous defaults are intentional: accepted episodes auto-commit, candidate
+  promotion is automated after metric gates pass, and evolution can merge LoRAs.
+- The source workspace must be clean before episode execution.
+- Patches are first applied and verified in linked worktrees under `runtime/`.
+- The test suite and configured verification commands are the primary merge gate.
+- Runtime artifacts live under `traces/`, `datasets/`, `models/`, and `runtime/`;
+  avoid hand-editing them unless a recovery doc says to.
+- Use `apply-episode` only as a manual recovery path when auto-commit is disabled
+  or a verified patch artifact must be replayed.
 
-`assess -> preflight -> recall -> plan -> execute -> reflect -> curate`
+## Architecture Map
 
-1. **preflight**: Source repo must be clean (git status)
-2. **recall**: Pull relevant memories from Engram
-3. **plan**: Student hints locally, teacher generates plan + patch
-4. **execute**: Patch applied in isolated worktree, verification runs there
-5. **reflect**: Record outcome to memory
-6. **curate**: Append successful episodes to SFT/DPO datasets
+- `homunculus/orchestrator/loop.py` - episode lifecycle
+- `homunculus/task_runner/runner.py` - git worktrees, patch application, verification, commits
+- `homunculus/daemon.py` - continuous loop, task dispatch, introspection, evolution hook
+- `homunculus/introspection/` - metrics, critique, coverage, comparative analysis
+- `homunculus/task_generator/` - introspection and suggestion driven task creation
+- `homunculus/trainer/manager.py` - SFT, evaluation, promotion, merge orchestration
+- `homunculus/evolution/` - LoRA merge, validation, lineage
+- `homunculus/autonomy/` - preflight, precheck, reporting, acceptance, watchdog
+- `homunculus/storage.py` - append-only artifacts and registry persistence
 
-### Module Structure
+## Change Discipline
 
-- `homunculus/orchestrator/loop.py` - Episode lifecycle coordination
-- `homunculus/orchestrator/teacher.py` - OpenAI-compatible teacher client
-- `homunculus/orchestrator/student.py` - Local mlx-lm subprocess wrapper
-- `homunculus/task_runner/runner.py` - Git worktree isolation, patch application, verification
-- `homunculus/memory_client/engram.py` - Engram HTTP client
-- `homunculus/dataset_builder/builder.py` - SFT/DPO curation and snapshot materialization
-- `homunculus/trainer/manager.py` - Training orchestration, candidate evaluation, promotion gates, `run_merge`
-- `homunculus/storage.py` - Artifact persistence (events, episodes, patches, registry, task queue, merges, lineage)
-- `homunculus/config.py` - TOML config parsing into typed dataclasses
-- `homunculus/policy.py` - Guardrail pattern matching (block/warn rules)
-- `homunculus/models.py` - Core dataclasses (EpisodeRecord, SFTSample, AdapterManifest, MergeManifest, LineageRecord, TaskQueueEntry, etc.)
-- `homunculus/daemon.py` - Continuous autonomous loop: introspection, task queue, `_check_evolution`
-- `homunculus/introspection/` - Self-analysis modes (metrics, critique, coverage, comparative) + rotating scheduler
-- `homunculus/task_generator/` - Weakness → task synthesis, user-suggestion resonance scanner, prioritizer
-- `homunculus/evolution/merge.py` - LoRA → base merge via MLX (α/r-scaled) or mergekit (PEFT-baked checkpoints)
-- `homunculus/evolution/validation.py` - Post-merge load / canary / coherence validation (fails closed)
-- `homunculus/evolution/lineage.py` - Full model history (registers every LoRA and every merge)
-
-### Safety Boundaries
-
-These are **intentional constraints**, not bugs:
-
-- Source workspace must be clean before any episode
-- `run-episode` never mutates the source repo during verification (worktree isolation)
-- Accepted patches are auto-committed to the source repo when `[daemon].auto_commit_on_accept = true` (default). Set to `false` to retain the manual `apply-episode` workflow — patch artifacts remain available either way.
-- Training only from immutable materialized snapshots
-- Candidate promotion is fully automated (the `require_human_approval` gate was removed in Phase 0); the promotion logic lives in `trainer/manager.promote_candidate`.
-
-### Artifact Layout
-
-```
-traces/
-  events.jsonl          # Append-only lifecycle events
-  episodes.jsonl        # Terminal episode records
-  patches/<episode_id>.patch
-
-datasets/
-  seed/sft_seed.jsonl   # Required for snapshot generation
-  sft/{train,valid,test}.jsonl
-  dpo/{train,valid}.jsonl
-  snapshots/sft/<snapshot_id>/
-
-models/
-  adapters/<candidate_id>/
-  registry.json         # Candidate manifests, active pointer
-
-runtime/
-  worktrees/<episode_id>/  # Temporary, cleaned up after episode
-```
-
-## Testing Patterns
-
-Tests use `tempfile.TemporaryDirectory` and create isolated git repos. The pattern:
-
-```python
-def _make_repo(self, temp_path: Path) -> tuple[Path, str]:
-    # Creates repo, commits, generates diff, resets
-    ...
-
-# Tests inject StaticTeacher/StaticStudent for deterministic responses
-# InMemoryMemoryClient replaces Engram in tests
-```
-
-Tests require git to be available. Use `@unittest.skipUnless(shutil.which("git"), "git is required")`.
-
-## Configuration
-
-TOML-based. Copy `homunculus.example.toml` to `homunculus.toml`. Key sections:
-
-- `[teacher]` - OpenAI-compatible endpoint config
-- `[student]` - mlx-lm subprocess commands
-- `[memory]` - Engram HTTP endpoints
-- `[workspaces.<name>]` - Repo path + verification commands
-- `[guardrails]` - Block/warn regex patterns
-- `[thresholds]` / `[promotion]` - Training and promotion gates
-
-Teacher output must decode to JSON with `plan`, `candidate_patch`, `rationale` fields.
-
-## Environment Variables
-
-- `OPENAI_API_KEY` - Teacher API auth
-- `ENGRAM_MCP_BEARER_TOKEN` - Engram bearer token
-
-## Dependencies
-
-- Python 3.11+
-- Git on PATH
-- Optional: `mlx-lm` for real local inference and training
+- Prefer existing patterns and files unless the harness standard needs a new
+  explicit artifact.
+- Keep docs, config, and tests aligned in the same change.
+- Run `python -m unittest discover -q` and `python -m homunculus.cli harness-check --strict`
+  before considering code changes complete.
+- Do not overwrite unrelated untracked files; this repo may contain local audit
+  artifacts under `docs/superpowers/`.

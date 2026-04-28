@@ -1,75 +1,33 @@
 # Homunculus
 
-`homunculus` is a standalone Python scaffold for a teacher-student self-improving coding agent.
+`homunculus` is a standalone Python scaffold for a teacher-student
+self-improving coding agent. It runs tasks against its own repository, verifies
+candidate patches in isolated git worktrees, commits accepted changes, curates
+successful episodes into training data, and evolves local LoRA adapters.
 
-It is designed around a conservative launch posture:
+The repository is also the harness: docs, checks, traces, scripts, and tests are
+kept local so future agent runs can inspect and improve the system directly.
 
-- episode execution happens in linked git worktrees, not in the source repo
-- accepted patches are stored as review artifacts and are not auto-applied
-- training runs from immutable materialized snapshots, not from live append-only dataset files
-- evaluation and promotion are separate steps, with human approval required for promotion
+## Current Posture
 
-## What it does
-
-At a high level, `homunculus` runs this loop:
-
-1. preflight a target workspace
-2. recall relevant memory from Engram
-3. ask the student for a local hint
-4. ask the teacher for a plan and patch
-5. evaluate guardrails
-6. execute the patch in an isolated worktree
-7. run verification commands
-8. persist the episode, patch, events, and memory outcomes
-9. curate verified successful runs into SFT and DPO data
-10. materialize SFT snapshots and train local adapters
-
-## Current scope
-
-Implemented now:
-
-- config-driven runtime and artifact layout
-- OpenAI-compatible teacher client
-- local student runner shaped for `mlx-lm`
-- Engram-compatible memory client
-- worktree-isolated task execution
-- durable episode and event persistence
-- SFT/DPO curation with retry-safe provenance
-- immutable SFT snapshot materialization
-- candidate evaluation and gated promotion
-- `doctor` checks for launch readiness
-
-Out of scope at launch:
-
-- auto-committing source repos
-- auto-applying accepted patches
-- auto-promoting trained candidates
-- live DPO training
-- non-git workspaces
+- Autonomous defaults: accepted patches auto-commit, promotion is automated
+  after metric gates pass, and evolution can merge LoRAs.
+- Worktree isolation remains mandatory: generated patches are verified outside
+  the source workspace before source mutation.
+- Tests and configured verification commands are the primary merge gate.
+- Runtime evidence is append-only under `traces/`, `datasets/`, `models/`, and
+  `runtime/`.
 
 ## Documentation
 
-- [Setup and Configuration](docs/setup-and-configuration.md)
-- [Operator Guide](docs/operator-guide.md)
+- [Documentation Index](docs/index.md)
+- [Harness Engineering Standard](docs/harness-engineering.md)
 - [Architecture and Artifacts](docs/architecture.md)
+- [Operator Guide](docs/operator-guide.md)
+- [Setup and Configuration](docs/setup-and-configuration.md)
+- [Quality Score](docs/quality-score.md)
 
-## Prerequisites
-
-Minimum:
-
-- Python 3.11 or newer
-- Git installed and available on `PATH`
-- a git-based target workspace
-
-For production use:
-
-- an OpenAI-compatible teacher endpoint
-- an Engram server reachable over HTTP
-- `mlx-lm` installed on the machine that will run local student inference and SFT
-
-## Installation
-
-Create a virtual environment and install the project in editable mode:
+## Install
 
 ```powershell
 python -m venv .venv
@@ -78,123 +36,65 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-If you want the local student and SFT pipeline to run for real instead of in test mode, install `mlx-lm` in the same environment.
+Optional production dependencies:
 
-## Quick start
+- `mlx-lm` for local student inference and LoRA training
+- an OpenAI-compatible teacher endpoint
+- an Engram-compatible memory server
+- Git on `PATH`
 
-1. Copy the example config.
-
-```powershell
-Copy-Item homunculus.example.toml homunculus.toml
-```
-
-2. Edit `homunculus.toml`:
-
-- set the teacher endpoint and model
-- point each workspace at a real git repo
-- set verification commands that prove a patch is acceptable
-- leave `require_human_approval = true`
-
-3. Set environment variables for your teacher API key and Engram bearer token.
+## Core Commands
 
 ```powershell
-$env:OPENAI_API_KEY = "..."
-$env:ENGRAM_MCP_BEARER_TOKEN = "..."
-```
+# Run the harness and test baseline
+python -m homunculus.cli harness-check --strict
+python -m unittest discover -q
 
-4. Initialize artifact directories.
-
-```powershell
+# Initialize artifacts and check launch readiness
 python -m homunculus.cli init-artifacts --config homunculus.toml
-```
-
-5. Run readiness checks.
-
-```powershell
 python -m homunculus.cli doctor --config homunculus.toml
+python -m homunculus.cli autonomy-preflight --config homunculus.toml
+
+# Run one episode or one daemon cycle
+python -m homunculus.cli run-episode --config homunculus.toml --workspace self --task-id <task-id> --prompt "..."
+python -m homunculus.daemon --config homunculus.toml --once
+
+# Run continuously and inspect autonomy state
+python -m homunculus.daemon --config homunculus.toml
+python -m homunculus.cli autonomy-report --config homunculus.toml --json
 ```
 
-6. Run an episode.
+## Episode Lifecycle
 
-```powershell
-python -m homunculus.cli run-episode --config homunculus.toml --workspace self --task-id demo --prompt "Fix the failing tests in parser.py"
-```
+`assess -> preflight -> recall -> plan -> execute -> reflect -> curate`
 
-7. Inspect the returned `episode_id`, trace events, and stored patch artifact under `traces/patches/`.
-
-8. If the episode outcome is acceptable, explicitly apply the stored patch to the source repo.
-
-```powershell
-python -m homunculus.cli apply-episode --config homunculus.toml --episode-id <episode-id>
-```
-
-9. When you have enough verified data, simulate or run SFT.
-
-```powershell
-python -m homunculus.cli train-sft --config homunculus.toml --simulate
-```
-
-10. Evaluate the candidate and promote it only after review.
-
-```powershell
-python -m homunculus.cli evaluate-candidate --config homunculus.toml --candidate-id <candidate-id> --metrics-file metrics.json
-python -m homunculus.cli promote-candidate --config homunculus.toml --candidate-id <candidate-id> --human-approved
-```
-
-## CLI reference
-
-`init-artifacts`
-
-- creates the runtime artifact layout under `traces/`, `datasets/`, `models/`, and `runtime/`
-
-`doctor`
-
-- checks git, writable artifact directories, teacher auth env, Engram auth env, `mlx_lm` availability, Engram reachability, and workspace cleanliness
-
-`run-episode`
-
-- runs one teacher-student coding attempt against a configured workspace
-- blocks if the source repo is dirty
-- stores a patch artifact even when the episode is blocked or fails
-
-`apply-episode`
-
-- re-checks that the source workspace is clean
-- re-applies a stored patch artifact to the source repo
-- runs verification commands again
-- reverts the repo if verification fails
-
-`train-sft`
-
-- materializes an immutable snapshot under `datasets/snapshots/sft/<snapshot_id>/`
-- writes a candidate manifest into `models/registry.json`
-
-`evaluate-candidate`
-
-- records candidate metrics only
-- does not activate the model
-
-`promote-candidate`
-
-- activates an already-evaluated candidate
-- still requires `--human-approved` when approval is enabled in config
-
-## Important operating rules
-
-- The source workspace must be clean before an episode starts.
-- `homunculus` does not stash or reset user work for you.
-- Accepted patches stay as artifacts until you explicitly apply them.
-- Training lineage is snapshot-based. If a candidate was not trained from a snapshot, treat that as invalid.
-- Promotion is intentionally manual.
+1. preflight confirms the source workspace is a clean git repo
+2. recall retrieves relevant Engram memories
+3. the student provides a local hint
+4. the teacher returns structured JSON with a plan, patch, and rationale
+5. guardrails inspect the prompt, patch, and memories
+6. the patch is applied and verified in an isolated linked worktree
+7. accepted patches are applied to the source workspace and committed when
+   `daemon.auto_commit_on_accept = true`
+8. results are recorded to traces and memory
+9. successful episodes are curated into SFT/DPO data
+10. training, promotion, merge, and acceptance surfaces use those artifacts
 
 ## Development
 
-Run the test suite with:
+Run the required baseline before finishing changes:
 
 ```powershell
-python -m unittest discover -v
+python -m homunculus.cli harness-check --strict
+python -m unittest discover -q
 ```
+
+The test suite uses temporary git repositories and deterministic teacher/student
+test doubles. It requires Git to be available on `PATH`.
 
 ## Status
 
-This repo is a hardened scaffold, not a finished autonomous platform. It is suitable for building and iterating on the operational loop, but you still need to supply the real teacher endpoint, Engram deployment, verification commands, seed data, and evaluation process for your environment.
+Phase 5 autonomy tooling is present: daemon operation, introspection, generated
+tasks, auto-commit, candidate promotion, merge validation, preflight, reporting,
+and acceptance predicates. The next operational milestone is completing a real
+soak run and archiving the acceptance evidence.

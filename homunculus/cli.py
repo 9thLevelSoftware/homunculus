@@ -14,6 +14,7 @@ from .autonomy.acceptance import render_acceptance_markdown, validate_acceptance
 from .autonomy.precheck import format_precheck_table, run_precheck
 from .autonomy.preflight import format_preflight_table, run_preflight
 from .config import load_config
+from .harness import format_harness_report, run_harness_check
 from .models import EvaluationMetrics, TaskRequest
 from .runtime import build_runtime
 from .task_runner.runner import WorkspacePreflightError
@@ -24,6 +25,16 @@ def cmd_init_artifacts(args: argparse.Namespace) -> int:
     store.ensure_layout()
     print(json.dumps({"status": "ok", "root": str(config.paths.root)}))
     return 0
+
+
+def cmd_harness_check(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    report = run_harness_check(root, strict=args.strict)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_harness_report(report))
+    return 0 if report.ok else 1
 
 
 def cmd_run_episode(args: argparse.Namespace) -> int:
@@ -263,6 +274,15 @@ def main() -> int:
     init_parser = subparsers.add_parser("init-artifacts")
     init_parser.add_argument("--config", required=True)
     init_parser.set_defaults(func=cmd_init_artifacts)
+
+    harness_parser = subparsers.add_parser(
+        "harness-check",
+        help="Validate repository-local agent harness docs, config, and CI.",
+    )
+    harness_parser.add_argument("--root", default=".")
+    harness_parser.add_argument("--strict", action="store_true")
+    harness_parser.add_argument("--json", action="store_true")
+    harness_parser.set_defaults(func=cmd_harness_check)
 
     run_parser = subparsers.add_parser("run-episode")
     run_parser.add_argument("--config", required=True)
