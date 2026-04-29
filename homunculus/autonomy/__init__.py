@@ -19,6 +19,7 @@ from .models import (
 from .precheck import ThroughputPrecheck, run_precheck
 from .preflight import run_preflight
 from .reporter import generate_report
+from .sources import SELF_DIRECTED_SOURCES, SUGGESTION_SOURCES, classify_source
 from .watchdog import Watchdog
 
 __all__ = [
@@ -27,9 +28,12 @@ __all__ = [
     "CriterionResult",
     "GateResult",
     "PreflightResult",
+    "SELF_DIRECTED_SOURCES",
+    "SUGGESTION_SOURCES",
     "ThroughputPrecheck",
     "Watchdog",
     "WatchdogSnapshot",
+    "classify_source",
     "generate_report",
     "run_precheck",
     "run_preflight",

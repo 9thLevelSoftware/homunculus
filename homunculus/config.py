@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,16 +93,26 @@ class DPOSettings:
     env: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass
-class PatternRule:
+@dataclass(frozen=True)
+class CompiledGuardrailRule:
+    """A guardrail pattern with its regex pre-compiled at config load.
+
+    ``pattern`` is the original string (kept for diagnostics / serialization
+    round-trips). ``regex`` is the compiled counterpart used by
+    :class:`GuardrailEngine`. Compilation happens once in
+    :func:`_parse_rules` so a malformed pattern fails ``load_config``
+    rather than the first episode.
+    """
+
     pattern: str
     message: str
+    regex: "re.Pattern[str]"
 
 
 @dataclass
 class GuardrailSettings:
-    block_patterns: list[PatternRule] = field(default_factory=list)
-    warn_patterns: list[PatternRule] = field(default_factory=list)
+    block_patterns: list[CompiledGuardrailRule] = field(default_factory=list)
+    warn_patterns: list[CompiledGuardrailRule] = field(default_factory=list)
 
 
 @dataclass
@@ -189,8 +200,35 @@ def _resolve(base: Path, value: str) -> Path:
     return (base / path).resolve()
 
 
-def _parse_rules(items: list[dict[str, str]] | None) -> list[PatternRule]:
-    return [PatternRule(pattern=item["pattern"], message=item["message"]) for item in (items or [])]
+def _parse_rules(items: list[dict[str, str]] | None) -> list[CompiledGuardrailRule]:
+    """Parse ``{pattern, message}`` TOML tables into CompiledGuardrailRule.
+
+    Compiles each regex at load so a malformed pattern crashes
+    ``load_config`` with :class:`re.error` rather than the first episode
+    that matches (audit 2026-04-16 findings). Flags are the same as the
+    pre-compile era (``IGNORECASE | MULTILINE``) for behavioral parity.
+    """
+    if not items:
+        return []
+    rules: list[CompiledGuardrailRule] = []
+    for i, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"guardrails pattern #{i} must be a table with "
+                f"'pattern' and 'message' keys"
+            )
+        pattern = entry.get("pattern")
+        message = entry.get("message")
+        if not isinstance(pattern, str) or not isinstance(message, str):
+            raise ValueError(
+                f"guardrails pattern #{i} requires string 'pattern' "
+                f"and 'message' keys; got {entry!r}"
+            )
+        compiled = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        rules.append(CompiledGuardrailRule(
+            pattern=pattern, message=message, regex=compiled
+        ))
+    return rules
 
 
 def _parse_verification(items: list[dict[str, str]] | None) -> list[VerificationCommand]:

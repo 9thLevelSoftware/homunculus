@@ -489,6 +489,18 @@ class Daemon:
                     accepted += 1
                 elif outcome == "reverted":
                     reverted += 1
+                    # Phase-5 watchdog: record the revert so
+                    # repeat_revert:<task_id> can surface once the
+                    # per-task threshold is crossed. Wrapped so a
+                    # watchdog I/O failure never crashes a cycle.
+                    try:
+                        self._watchdog.record_task_revert(task.task_id)
+                        self._watchdog.save()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Watchdog revert recording failed for %s: %s",
+                            task.task_id, exc,
+                        )
                 # Mark queue entry completed with the episode outcome. Even
                 # outcomes like "blocked" or "error" are terminal from the
                 # queue's perspective — the task ran, produced a verdict,

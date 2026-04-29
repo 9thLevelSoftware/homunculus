@@ -99,7 +99,7 @@ def _write_task_history(
             "task_id": f"gen-{i}",
             "task": {
                 "task_id": f"gen-{i}",
-                "source": "generated",
+                "source": "introspection",
                 "prompt": "auto",
                 "priority": 0.5,
                 "introspection_mode": None,
@@ -121,7 +121,7 @@ def _write_task_history(
             "task_id": f"user-{i}",
             "task": {
                 "task_id": f"user-{i}",
-                "source": "suggestion",
+                "source": "user",
                 "prompt": "human",
                 "priority": 0.5,
                 "introspection_mode": None,
@@ -450,6 +450,22 @@ class PreflightTests(unittest.TestCase):
             repo_path = self._make_repo(temp_path)
             config_path = self._config_path(temp_path, repo_path)
             settings = load_config(config_path)
+
+            # Seed the introspection cache so task_queue_ready can
+            # dry-run the generator. Previously the gate passed
+            # tautologically on empty cache; after B4 it correctly
+            # fails closed without a real generator signal.
+            settings.paths.traces_dir.mkdir(parents=True, exist_ok=True)
+            (settings.paths.traces_dir / "introspection.jsonl").write_text(
+                '{"mode": "metrics",'
+                ' "timestamp": "2026-04-16T00:00:00+00:00",'
+                ' "findings": [{"type": "high_error_rate",'
+                ' "value": 0.5, "severity": "critical"}],'
+                ' "summary": "seed",'
+                ' "metrics": {},'
+                ' "recommendations": []}\n',
+                encoding="utf-8",
+            )
 
             # Distinguish subprocess callers by argv[0]:
             #   - git status --porcelain → empty stdout (clean)
@@ -1306,6 +1322,298 @@ class ThroughputPrecheckTests(unittest.TestCase):
             self.assertEqual(cli.returncode, 2, cli.stderr)
             payload = json.loads(cli.stdout)
             self.assertEqual(payload["verdict"], "BLOCK")
+
+
+class AutonomySourcesVocabularyTests(unittest.TestCase):
+    """The SC2 source-name vocabulary is the contract between
+    producers (task_generator, suggestions) and the consumer
+    (reporter). Lock it here so any future rename breaks this test."""
+
+    def test_self_directed_matches_producer_emission(self):
+        from homunculus.autonomy.sources import (
+            SELF_DIRECTED_SOURCES,
+            SUGGESTION_SOURCES,
+            classify_source,
+        )
+        # Producers emit these literals today; see task_generator/generator.py
+        # (source="introspection") and suggestions.py (source="user").
+        self.assertIn("introspection", SELF_DIRECTED_SOURCES)
+        self.assertIn("continuation", SELF_DIRECTED_SOURCES)
+        self.assertIn("user", SUGGESTION_SOURCES)
+        # No overlap.
+        self.assertFalse(SELF_DIRECTED_SOURCES & SUGGESTION_SOURCES)
+
+    def test_classify_source_normalizes_case_and_whitespace(self):
+        from homunculus.autonomy.sources import classify_source
+        self.assertEqual(classify_source("Introspection"), "self_directed")
+        self.assertEqual(classify_source("  user  "), "suggestion")
+        self.assertEqual(classify_source("continuation"), "self_directed")
+        self.assertEqual(classify_source(""), "other")
+        self.assertEqual(classify_source(None), "other")
+        self.assertEqual(classify_source("unknown-source"), "other")
+
+
+class ReporterSourceHarmonizationTests(unittest.TestCase):
+    """B3 regression test — real producer literals must count."""
+
+    def _entry(self, source: str, outcome: str) -> dict:
+        return {
+            "task_id": f"t-{source}-{outcome}",
+            "outcome": outcome,
+            "task": {"source": source},
+        }
+
+    def test_introspection_task_counts_as_self_directed(self):
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [self._entry("introspection", "success")]
+        self.assertEqual(_count_self_directed(history), 1)
+
+    def test_continuation_task_counts_as_self_directed(self):
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [self._entry("continuation", "success")]
+        self.assertEqual(_count_self_directed(history), 1)
+
+    def test_user_task_counts_as_suggestion(self):
+        from homunculus.autonomy.reporter import _count_suggestion_tasks
+        history = [self._entry("user", "success")]
+        self.assertEqual(_count_suggestion_tasks(history), 1)
+
+    def test_failed_outcome_never_counts(self):
+        from homunculus.autonomy.reporter import (
+            _count_self_directed,
+            _count_suggestion_tasks,
+        )
+        history = [
+            self._entry("introspection", "error"),
+            self._entry("user", "blocked"),
+        ]
+        self.assertEqual(_count_self_directed(history), 0)
+        self.assertEqual(_count_suggestion_tasks(history), 0)
+
+    def test_legacy_literals_no_longer_counted(self):
+        """The old hardcoded ``generated`` / ``resonance`` literals were
+        never emitted by any producer. They must NOT be counted (they
+        were the B3 symptom; leaving them would mask the fix)."""
+        from homunculus.autonomy.reporter import _count_self_directed
+        history = [
+            self._entry("generated", "success"),
+            self._entry("resonance", "success"),
+        ]
+        self.assertEqual(_count_self_directed(history), 0)
+
+
+class PreflightQueueReadyHardenedTests(unittest.TestCase):
+    """B4 regression: empty queue + no fallback signal must fail."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "runtime").mkdir()
+        (self.root / "traces").mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _settings(self):
+        from pathlib import Path
+        from homunculus.config import load_config
+        source = Path("homunculus.example.toml").read_text(encoding="utf-8")
+        config_path = self.root / "config.toml"
+        config_path.write_text(
+            source.replace('path = "."', f'path = "{self.root.as_posix()}"', 1),
+            encoding="utf-8",
+        )
+        return load_config(config_path)
+
+    def test_empty_queue_and_empty_introspection_cache_fails(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertFalse(result.passed, result.detail)
+        self.assertIn("no pending tasks", result.detail.lower())
+
+    def test_empty_queue_but_introspection_cache_present_passes(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        introspection_path = self.root / "traces" / "introspection.jsonl"
+        # IntrospectionResult.from_dict uses cls(**payload), so all six
+        # dataclass fields (mode, timestamp, findings, summary, metrics,
+        # recommendations) must be present. The "metrics" mode with a
+        # critical high_error_rate finding is the confirmed-yielding
+        # shape (same pattern used by TaskGeneratorSourceContractTests
+        # in tests/test_task_generator.py).
+        introspection_path.write_text(
+            '{"mode": "metrics",'
+            ' "timestamp": "2026-04-16T00:00:00+00:00",'
+            ' "findings": [{"type": "high_error_rate", "value": 0.5,'
+            ' "severity": "critical"}],'
+            ' "summary": "soak-seed",'
+            ' "metrics": {},'
+            ' "recommendations": []}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+
+    def test_pending_queue_entry_passes(self):
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        queue_path = self.root / "runtime" / "task_queue.jsonl"
+        queue_path.write_text(
+            '{"task_id":"x","status":"pending","task":{"source":"introspection","prompt":"p","task_id":"x"}}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+        self.assertIn("1 pending task", result.detail)
+
+    def test_malformed_introspection_row_is_skipped(self):
+        """Partial writes / corrupt JSONL rows must be tolerated — one
+        valid record downstream is enough to pass the gate."""
+        from homunculus.autonomy.preflight import _gate_task_queue_ready
+        introspection_path = self.root / "traces" / "introspection.jsonl"
+        introspection_path.write_text(
+            # Truncated / invalid JSON on line 1 (simulates partial write).
+            '{"mode": "metrics", "finding'
+            "\n"
+            # Well-formed payload on line 2 — this is what the gate should
+            # count and feed to the generator.
+            '{"mode": "metrics",'
+            ' "timestamp": "2026-04-16T00:00:00+00:00",'
+            ' "findings": [{"type": "high_error_rate", "value": 0.5, "severity": "critical"}],'
+            ' "summary": "soak-seed",'
+            ' "metrics": {},'
+            ' "recommendations": []}\n',
+            encoding="utf-8",
+        )
+        settings = self._settings()
+        result = _gate_task_queue_ready(settings)
+        self.assertTrue(result.passed, result.detail)
+        # Detail must report 1 usable record (not 2, not 0). The wording
+        # uses "recent introspection record(s)" after the tail-limit fix.
+        self.assertIn("1 recent introspection record", result.detail)
+
+
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class SignalFidelityIntegrationTests(unittest.TestCase):
+    """End-to-end: a full-cycle daemon run populates a realistic
+    task_history + watchdog.json, then generate_report returns
+    non-zero SC2 counts AND reflects the watchdog's revert signal.
+    This is the regression guard for all four Wave 1–4 fixes."""
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_full_cycle_populates_real_report_fields(self):
+        import json as _json
+        from homunculus.config import load_config
+        from homunculus.storage import ArtifactStore
+        from homunculus.daemon import Daemon
+        from homunculus.autonomy.reporter import generate_report
+        from homunculus.models import GeneratedTask, TaskQueueEntry, utc_now
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+            config.introspection.enabled = False
+            config.evolution.enabled = False
+
+            store = ArtifactStore(config)
+            store.ensure_layout()
+
+            # Seed three pending queue entries: two introspection-sourced
+            # (one will be accepted, one reverted) and one user-sourced
+            # (accepted). This isolates the cycle from the suggestion
+            # reader / introspection scheduler and exercises the exact
+            # vocabulary the B3 fix depends on.
+            specs = [
+                ("t-intro-ok", "introspection", "accepted"),
+                ("t-user-ok", "user", "accepted"),
+                ("t-intro-revert", "introspection", "reverted"),
+            ]
+            for task_id, source, _outcome in specs:
+                task = GeneratedTask(
+                    task_id=task_id,
+                    source=source,
+                    prompt=f"task {task_id}",
+                )
+                store.append_to_queue(TaskQueueEntry(
+                    task_id=task_id,
+                    task=task,
+                    queued_at=utc_now(),
+                    status="pending",
+                ))
+
+            # Map outcomes by task_id: the prioritizer reorders tasks by
+            # alignment score (introspection=1.0 beats user=0.5), so a
+            # positional side_effect list would misalign outcomes to
+            # tasks. Resolve by the TaskRequest.task_id instead — this
+            # is what actually identifies the dispatched task.
+            outcome_by_id = {tid: outcome for tid, _src, outcome in specs}
+
+            def _run_episode(task_request):
+                ep = MagicMock()
+                ep.outcome = outcome_by_id[task_request.task_id]
+                ep.episode_id = f"ep-{task_request.task_id}"
+                return ep
+
+            orchestrator = MagicMock()
+            orchestrator.run_episode.side_effect = _run_episode
+
+            daemon = Daemon(config, orchestrator=orchestrator, store=store)
+            result = daemon.run_once()
+
+            self.assertEqual(result.tasks_executed, 3, f"status={result.status} error={result.error}")
+            self.assertEqual(result.tasks_accepted, 2)
+            self.assertEqual(result.tasks_reverted, 1)
+
+            report = generate_report(
+                runtime_dir=config.paths.runtime_dir,
+                traces_dir=config.paths.traces_dir,
+                models_dir=config.paths.models_dir,
+            )
+            # B3: self-directed counts the introspection-accepted task.
+            self.assertEqual(
+                report.self_directed_tasks_completed, 1,
+                f"expected 1 self-directed accept; report={report!r}",
+            )
+            # B3: suggestion counts the user-accepted task.
+            self.assertEqual(
+                report.suggestion_tasks_completed, 1,
+                f"expected 1 suggestion accept; report={report!r}",
+            )
+            # T6: watchdog persisted a revert counter for t-intro-revert.
+            watchdog_path = config.paths.runtime_dir / "watchdog.json"
+            self.assertTrue(
+                watchdog_path.exists(),
+                "watchdog.json must persist after a reverted cycle",
+            )
+            snapshot = _json.loads(watchdog_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot.get("repeated_task_reverts", {}).get("t-intro-revert"),
+                1,
+                f"expected repeat counter=1 for t-intro-revert; "
+                f"snapshot={snapshot}",
+            )
 
 
 if __name__ == "__main__":

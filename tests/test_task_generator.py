@@ -680,5 +680,34 @@ class TestTaskFields(unittest.TestCase):
         self.assertEqual(tasks[0].context["value"], 0.2)
 
 
+class TaskGeneratorSourceContractTests(unittest.TestCase):
+    """Lock the ``source`` literal emitted by the task generator.
+
+    Regressions manifested historically as B3: the reporter expected
+    ``"generated"`` or ``"resonance"`` but the producer emitted
+    ``"introspection"``, silently zeroing SC2. If you change the
+    producer literal, update ``SELF_DIRECTED_SOURCES`` in
+    ``homunculus.autonomy.sources`` *first*."""
+
+    def test_metrics_findings_emit_introspection_source(self) -> None:
+        from homunculus.task_generator import TaskGenerator
+        from homunculus.autonomy.sources import SELF_DIRECTED_SOURCES
+
+        gen = TaskGenerator()
+        findings = [
+            {"type": "high_error_rate", "value": 0.5, "severity": "critical"}
+        ]
+        result = _make_result("metrics", findings)
+        tasks = gen.generate_from_introspection([result])
+        self.assertTrue(tasks, "generator must yield at least one task")
+        for task in tasks:
+            self.assertIn(
+                task.source,
+                SELF_DIRECTED_SOURCES,
+                f"producer emitted {task.source!r} which is not in "
+                f"SELF_DIRECTED_SOURCES={SELF_DIRECTED_SOURCES}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

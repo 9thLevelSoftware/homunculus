@@ -1489,5 +1489,105 @@ class CheckEvolutionIntegrationTests(unittest.TestCase):
             self.assertIn("merge-async-ok", text)
 
 
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class WatchdogRevertWiringTests(unittest.TestCase):
+    """The watchdog's ``repeat_revert:<task_id>`` flag depends on
+    ``record_task_revert`` being called from the daemon. Without the
+    wiring, the flag can never fire."""
+
+    def _make_repo(self, temp_path: Path) -> Path:
+        repo_path = temp_path / "repo"
+        repo_path.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, capture_output=True, check=True)
+        (repo_path / "file.py").write_text("# initial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_path, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, capture_output=True, check=True)
+        return repo_path
+
+    def _config_path(self, temp_dir: Path, repo_path: Path) -> Path:
+        source = Path("C:/Users/dasbl/Documents/homunculus/homunculus.example.toml")
+        content = source.read_text(encoding="utf-8")
+        content = content.replace('path = "."', f'path = "{repo_path.as_posix()}"', 1)
+        target = temp_dir / "config.toml"
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _build_daemon(
+        self, temp_path: Path, orch_outcome: str
+    ) -> tuple[Daemon, ArtifactStore, Path]:
+        config = load_config(self._config_path(temp_path, self._make_repo(temp_path)))
+        config.introspection.enabled = False
+        config.evolution.enabled = False
+
+        suggestions_dir = temp_path / "suggestions"
+        suggestions_dir.mkdir(parents=True, exist_ok=True)
+        (suggestions_dir / "test-task.md").write_text(
+            "# Test Task\n\n## Priority\nHIGH\n\n## What\nAdd a comment to file.py\n",
+            encoding="utf-8",
+        )
+
+        store = ArtifactStore(config)
+        store.ensure_layout()
+
+        episode = MagicMock()
+        episode.outcome = orch_outcome
+        episode.episode_id = "ep-1"
+        orchestrator = MagicMock()
+        orchestrator.run_episode.return_value = episode
+
+        daemon = Daemon(
+            config,
+            orchestrator=orchestrator,
+            suggestions_dir=suggestions_dir,
+            store=store,
+        )
+        return daemon, store, suggestions_dir
+
+    def test_reverted_outcome_increments_watchdog_revert_counter(self):
+        """After run_once with a reverted outcome, watchdog.json must
+        persist a repeated_task_reverts entry for the task id."""
+        import json as _json
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, _store, _ = self._build_daemon(temp_path, orch_outcome="reverted")
+            result = daemon.run_once()
+            self.assertEqual(result.tasks_reverted, 1)
+            watchdog_path = daemon.config.paths.runtime_dir / "watchdog.json"
+            self.assertTrue(
+                watchdog_path.exists(),
+                "watchdog.json must exist after record_task_revert + save()",
+            )
+            snapshot = _json.loads(watchdog_path.read_text(encoding="utf-8"))
+            counters = snapshot.get("repeated_task_reverts", {})
+            # Exactly one task was dispatched (seeded suggestion yields one);
+            # whatever id that is, its counter must be 1.
+            self.assertEqual(
+                len(counters), 1,
+                f"expected exactly one revert counter; got {counters}",
+            )
+            self.assertEqual(
+                list(counters.values())[0], 1,
+                f"counter for dispatched task must be 1; got {counters}",
+            )
+
+    def test_accepted_outcome_does_not_increment_revert(self):
+        """Non-reverted outcomes must NOT call record_task_revert."""
+        with tempfile.TemporaryDirectory() as temp_root:
+            temp_path = Path(temp_root)
+            daemon, _store, _ = self._build_daemon(temp_path, orch_outcome="accepted")
+            daemon.run_once()
+            watchdog_path = daemon.config.paths.runtime_dir / "watchdog.json"
+            if watchdog_path.exists():
+                import json as _json
+                snapshot = _json.loads(watchdog_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    snapshot.get("repeated_task_reverts", {}),
+                    {},
+                    "accepted outcome must not touch revert counters",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
