@@ -20,6 +20,7 @@ This directory is the repository-local source of truth for agents and operators.
 - [VM Runbook](vm-runbook.md) - Ubuntu GPU VM, Ollama, Codex profile, smoke, and
   soak operating steps.
 - [Quality Score](quality-score.md) - current grades, gaps, and cleanup cadence.
+- [Autonomous Self-Improvement Roadmap](autonomy-roadmap.md) - phased execution plan for autonomy hardening and continuous self-improvement.
 
 ## Planning Artifacts
 
