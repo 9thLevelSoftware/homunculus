@@ -10,10 +10,16 @@ import unittest
 from homunculus.symphony.merge_gate import MergeGate
 from homunculus.symphony.models import AgentResult, IssueRecord
 from homunculus.symphony.orchestrator import SymphonyOrchestrator
+from homunculus.symphony.runner import HomunculusEpisodeRunner
 from homunculus.symphony.status import load_symphony_status
 from homunculus.symphony.tracker import LinearTracker
 from homunculus.symphony.workflow import WorkflowError, load_workflow, render_prompt
-from homunculus.symphony.workspace import WorkspaceManager, branch_name_for_issue, sanitize_workspace_key
+from homunculus.symphony.workspace import (
+    WorkspaceManager,
+    WorkspaceRecord,
+    branch_name_for_issue,
+    sanitize_workspace_key,
+)
 
 
 def _run_git(cwd: Path, args: list[str]) -> str:
@@ -25,6 +31,66 @@ def _run_git(cwd: Path, args: list[str]) -> str:
         check=True,
     )
     return result.stdout.strip()
+
+
+def _minimal_homunculus_toml() -> str:
+    return """
+[teacher]
+provider = "openai-compatible"
+model = "x"
+base_url = "http://example"
+endpoint = "/c"
+api_key_env = "X"
+
+[student]
+model_id = "x"
+generate_command = ["echo"]
+train_command = ["echo"]
+
+[memory]
+base_url = "http://example"
+search_endpoint = "/s"
+store_endpoint = "/x"
+bearer_token_env = "Y"
+
+[thresholds]
+train_after_samples = 1
+train_after_days = 1
+max_self_generated_ratio = 0.5
+min_eval_success_delta = 0.0
+
+[promotion]
+allow_zero_canary_regressions = true
+min_task_success_delta = 0.0
+max_tool_misuse_increase = 0.0
+
+[paths]
+root = "."
+traces_dir = "traces"
+datasets_dir = "datasets"
+models_dir = "models"
+runtime_dir = "runtime"
+seed_sft_path = "datasets/seed/sft_seed.jsonl"
+seed_dpo_path = "datasets/seed/dpo_seed.jsonl"
+
+[dpo]
+enabled = false
+
+[daemon]
+enabled = true
+cycle_interval_minutes = 1
+max_episodes_per_cycle = 1
+
+[evolution]
+enabled = true
+auto_promote = true
+auto_apply = false
+
+[guardrails]
+
+[workspaces.self]
+path = "."
+"""
 
 
 @unittest.skipUnless(shutil.which("git"), "git is required")
@@ -106,6 +172,69 @@ Issue {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
                 branch_name_for_issue(issue, config),
                 "codex/HOM_1-add-symphony-core",
             )
+
+    def test_workspace_manager_ignores_non_codex_linear_branch_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._make_repo(root)
+            config = load_workflow(self._workflow_path(root, repo))
+            issue = IssueRecord(
+                id="1",
+                identifier="HOM-1",
+                title="Linear suggested branch",
+                branch_name="dasblueeyeddevil/HOM-1-linear-suggested",
+            )
+
+            workspace = WorkspaceManager(config).ensure_workspace(issue)
+
+            self.assertEqual(workspace.branch_name, "codex/HOM-1-linear-suggested-branch")
+
+    def test_workspace_manager_recreates_existing_wrong_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._make_repo(root)
+            config = load_workflow(self._workflow_path(root, repo))
+            issue = IssueRecord(id="1", identifier="HOM-1", title="Wrong branch")
+            workspace_path = config.workspace.root / "HOM-1"
+            workspace_path.parent.mkdir(parents=True)
+            _run_git(
+                repo,
+                [
+                    "worktree",
+                    "add",
+                    "-B",
+                    "dasblueeyeddevil/HOM-1-wrong-branch",
+                    str(workspace_path),
+                    "master",
+                ],
+            )
+
+            workspace = WorkspaceManager(config).ensure_workspace(issue)
+
+            self.assertEqual(workspace.branch_name, "codex/HOM-1-wrong-branch")
+            self.assertEqual(_run_git(workspace.path, ["branch", "--show-current"]), workspace.branch_name)
+
+    def test_episode_runner_binds_artifacts_to_issue_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._make_repo(root)
+            config_path = root / "homunculus.toml"
+            workflow = self._workflow_path(root, repo)
+            config_path.write_text(_minimal_homunculus_toml(), encoding="utf-8")
+            config = load_workflow(workflow)
+            workspace_path = root / "workspaces" / "HOM-1"
+            workspace_path.mkdir(parents=True)
+            workspace = WorkspaceRecord(
+                path=workspace_path,
+                workspace_key="HOM-1",
+                branch_name="codex/HOM-1-test",
+            )
+
+            hom_config = HomunculusEpisodeRunner(config)._load_workspace_config(workspace)
+
+            self.assertEqual(hom_config.paths.traces_dir, workspace_path / "traces")
+            self.assertEqual(hom_config.paths.runtime_dir, workspace_path / "runtime")
+            self.assertEqual(hom_config.workspaces["symphony"].path, workspace_path)
 
 
 @unittest.skipUnless(shutil.which("git"), "git is required")

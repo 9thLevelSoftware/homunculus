@@ -1,4 +1,7 @@
-# Homunculus — Roadmap
+# Homunculus — Roadmap (ARCHIVED)
+
+> **Archived 2026-04-29.** This roadmap is superseded by Symphony orchestration.
+> Retained for historical reference only.
 
 ## Phases
 
@@ -7,7 +10,7 @@
 - [x] **Phase 2: Introspection System** — Complete
 - [x] **Phase 3: Task Generation** — Complete
 - [x] **Phase 4: Weight Evolution** — Complete
-- [ ] **Phase 5: Full Autonomy** — Hands-off
+- [~] **Phase 5: Full Autonomy** — Tooling complete, soak never executed; archived
 
 ## Phase Details
 
@@ -201,5 +204,5 @@
 | Phase 2: Introspection | 5 | 5 | Complete |
 | Phase 3: Task Generation | 4 | 4 | Complete |
 | Phase 4: Weight Evolution | 4 | 4 | Complete (reviewed — see `.planning/phases/04-weight-evolution/04-REVIEW.md`) |
-| Phase 5: Full Autonomy | 1-2 | 0 | Not started |
-| **Total** | **18-19** | **17** | **~94% complete** |
+| Phase 5: Full Autonomy | 3 | 2 | Archived (soak never executed) |
+| **Total** | **20** | **19** | **ARCHIVED** |

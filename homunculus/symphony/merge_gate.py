@@ -42,6 +42,7 @@ class MergeGate:
     def merge_branch(self, workspace: WorkspaceRecord) -> str:
         source = self.config.homunculus.source_workspace
         self._require_clean(source)
+        self._require_clean(workspace.path)
         current = self._git(source, ["branch", "--show-current"], check=True).stdout.strip()
         if current != self.config.homunculus.base_branch:
             raise MergeGateError(

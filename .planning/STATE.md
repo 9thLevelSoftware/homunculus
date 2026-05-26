@@ -1,252 +1,36 @@
 # Project State
 
-## Current Position
-- **Phase**: 5 of 5 (Full Autonomy) — review-passed for landed tooling; soak execution pending target-PC
-- **Status**: Phase 5 tooling + kickoff suite REVIEW-PASSED after 3 cycles (reality-checker PASS, senior-dev APPROVE, infra-maintainer PASS, evidence-collector PASS). 326 tests pass. See `.planning/phases/05-full-autonomy/05-REVIEW.md`. Overall phase completion still requires post-soak `autonomy-accept` sign-off in a future session.
-- **Last Activity**: Phase 5 /legion:review complete — 3 cycles, 20 findings resolved, 6 deferred (2026-04-16)
+## Status: ARCHIVED
 
-## Progress
-```
-[####################] 20/20 planned artifacts — Phase 5 tooling + review done; soak execution pending target PC
-```
+**Archived**: 2026-04-29
+**Reason**: Legion phased roadmap (Phases 0–5) superseded by Symphony orchestration architecture. Planning docs no longer reflect codebase reality.
 
-## Completed Work
+## What Was Completed (Phases 0–4)
 
-### Phase 2: Introspection System (COMPLETE)
-- Created `homunculus/introspection/` package with base protocol and scheduler
-- Added `IntrospectionMode` protocol and `IntrospectionContext` dataclass
-- Added `IntrospectionResult` dataclass to models.py
-- Added `IntrospectionSettings` to config.py with graceful defaults
-- Implemented `IntrospectionScheduler` with mode rotation (metrics:1, critique:3, coverage:5, comparative:3)
-- Implemented `MetricsMode` — quantitative performance metrics
-- Implemented `CoverageMode` — pytest-cov, TODO scanning, test gaps
-- Implemented `CritiqueMode` — LLM-based episode pattern analysis
-- Implemented `ComparativeMode` — winner vs loser patch comparison
-- Added introspection result persistence to storage.py
-- Commits: `fe29ded`, `3b2e70a`
+All core subsystems delivered and reviewed:
 
-### Phase 1: Daemon Mode (COMPLETE)
-- Added `DaemonSettings` dataclass to config.py
-- Added `DaemonState` dataclass to models.py with serialization
-- Added state persistence (load_state, save_state) with atomic writes
-- Added single-instance lock (acquire_lock, release_lock)
-- Created `runtime.py` module to avoid circular imports
-- Implemented `run_continuous()` with configurable interval
-- Added SIGINT/SIGTERM signal handlers with graceful shutdown
-- Added 7 new tests (26 total, all passing)
-- Commits: `7159a42`, `db0f744`, `d51e7a7`
+| Phase | Outcome | Tests |
+|-------|---------|-------|
+| 0. Autonomous Bootstrap | Approval gates removed, auto-commit, daemon `--once` | baseline |
+| 1. Daemon Mode | Continuous loop, signal handling, state persistence | 26 |
+| 2. Introspection System | 4 modes + rotating scheduler | 63 |
+| 3. Task Generation | Generator, suggestion resonance, prioritizer | 174 |
+| 4. Weight Evolution | LoRA merge, lineage, validation | 286 |
 
-### Phase 0: Autonomous Bootstrap (COMPLETE)
-- Removed `require_human_approval` from PromotionSettings
-- Removed `human_approved` parameter from `promote_candidate()`
-- Added `CommitResult` dataclass and `commit_to_source()` method
-- Added `GeneratedTask` dataclass
-- Added `SuggestionReader` class for markdown parsing
-- Added `Daemon` class with `--once` mode
-- Added `[daemon]` and `[evolution]` config sections
-- Merged to master: commit `4225eab`
+## Phase 5 Disposition
 
-## Recent Decisions
+Phase 5 (Full Autonomy soak) tooling was built and review-passed but the 7-day soak was never executed — throughput gate blocked on empty episode history. Soak protocol and scripts remain in `scripts/phase5/` and `.planning/phases/05-full-autonomy/` for reference.
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Execution mode | Autonomous | Minimal check-ins, review at phase boundaries |
-| Planning depth | Deep Analysis | Thorough architectural analysis before each phase |
-| Cost profile | Premium | Opus throughout for maximum quality |
-| Scope | All phases (1-5) | Full roadmap from daemon through autonomy |
+## Post-Roadmap Work (Not Tracked Here)
 
-## Phase 1 Verification
+After the phased roadmap, significant new architecture landed outside Legion tracking:
 
-| Criteria | Status |
-|----------|--------|
-| `python -m homunculus.daemon --config homunculus.toml` runs continuously | Pass |
-| Ctrl+C stops gracefully after current episode completes | Pass |
-| State persists across restarts | Pass |
-| Config interval is respected between cycles | Pass |
-| Tests cover signal handling and state persistence | Pass (7 new tests) |
+- **Symphony package** (`homunculus/symphony/`) — Linear issue orchestration, workflow engine, merge gate, workspace management
+- **Harness module** (`homunculus/harness.py`) — TOML-driven `harness-check` CLI
+- **Signal fidelity fixes** — source vocabulary, preflight hardening, watchdog wiring, guardrail regex compilation
+- **CLI expansion** — symphony commands, harness-check, status subcommands
+- **357 tests passing** (up from 326 at archive time)
 
-## Phase 2 Plan Summary
+## Archive Note
 
-| Plan | Wave | Title | Agent |
-|------|------|-------|-------|
-| 02-01 | 1 | Infrastructure (scheduler, config, storage) | Senior Developer |
-| 02-02 | 2 | Metrics Mode | Data Analytics Engineer |
-| 02-03 | 2 | Coverage Mode | Infrastructure & DevOps Engineer |
-| 02-04 | 2 | Critique Mode | AI Engineer |
-| 02-05 | 2 | Comparative Mode | Data Analytics Engineer |
-
-### Auto-Refine Applied (1 cycle)
-Critical issues fixed:
-- Plan 02-01: Added graceful config defaults, cycle 0 edge case fix, result persistence
-- Plan 02-03: Fixed pytest-cov JSON mechanism, use sys.executable
-- Plan 02-04: Fixed teacher API signature (TaskRequest, not raw prompt)
-
-## Phase 2 Verification
-
-| Criteria | Status |
-|----------|--------|
-| IntrospectionMode protocol defined | Pass |
-| IntrospectionScheduler with mode rotation | Pass |
-| MetricsMode computes success/retry/failure rates | Pass |
-| CoverageMode runs pytest-cov and TODO scanning | Pass |
-| CritiqueMode uses teacher API for LLM analysis | Pass |
-| ComparativeMode groups and compares episodes | Pass |
-| All modes implement protocol correctly | Pass |
-| Tests pass (26 total) | Pass |
-| Commits: `fe29ded`, `3b2e70a` | Complete |
-
-## Phase 3 Plan Summary
-
-| Plan | Wave | Title | Agent |
-|------|------|-------|-------|
-| 03-01 | 1 | Task Queue Infrastructure | Senior Developer |
-| 03-02 | 2 | Task Generator | AI Engineer |
-| 03-03 | 2 | Suggestion Resonance Scanner | AI Engineer |
-| 03-04 | 3 | Prioritizer + Integration + Tests | Senior Developer |
-
-### Auto-Refine Applied (2 cycles)
-Critical fixes incorporated:
-- Plan 03-01: TaskQueueEntry field specification, nested serialization
-- Plan 03-02: Defensive finding parsing with `_infer_severity()`
-- Plan 03-03: Extended RESONANCE_KEYWORDS with mode-specific terms
-- Plan 03-04: Backward-compatible Daemon constructor, edge case handling
-
-## Phase 3 Execution Results
-
-| Plan | Wave | Status | Tests Added |
-|------|------|--------|-------------|
-| 03-01 | 1 | Complete | 10 (queue infrastructure) |
-| 03-02 | 2 | Complete | 47 (task generator) |
-| 03-03 | 2 | Complete | 8 (resonance scanner) |
-| 03-04 | 3 | Complete | 47 (prioritizer + integration) |
-
-**Total Tests**: 174 (111 new in Phase 3)
-**Commits**: `abeb215`, `9c61a3e`, `c8a16ac`
-
-## Phase 3 Review Results
-
-| Cycle | Findings | Fixed | Verdict |
-|-------|----------|-------|---------|
-| 1 | 7 WARNINGs, 12 SUGGESTIONs | 7 | NEEDS WORK |
-| 2 | 0 | 0 | PASS |
-
-Key fixes applied:
-- Deduplication after priority calculation (logic bug)
-- Smooth exponential decay for resonance weights
-- Defensive dict access in generator prompt formatting
-- FIFO tiebreaker and orchestrator exception tests
-
-## Phase 4 Plan Summary
-
-| Plan | Wave | Title | Agent |
-|------|------|-------|-------|
-| 04-01 | 1 | Infrastructure (Config, Models, Storage) | Senior Developer |
-| 04-02 | 2 | Merge Pipeline | AI Engineer |
-| 04-03 | 2 | Lineage Tracking | Senior Developer |
-| 04-04 | 3 | Validation + Integration | AI Engineer |
-
-### Auto-Refine Applied (1 cycle)
-Critical fixes incorporated:
-- Plan 04-01: Atomic file updates for `update_merge()` using temp file + `os.replace()`
-- Plan 04-02: Added prerequisite task to verify mergekit installation before implementation
-- Plan 04-04: Lazy imports to avoid breaking existing tests, persistent merge failure counter, daemon integration hook, platform-aware coherence validation
-
-## Phase 4 Execution Results
-
-| Plan | Wave | Status | Tests Added |
-|------|------|--------|-------------|
-| 04-01 | 1 | Complete | 13 (infrastructure) |
-| 04-02 | 2 | Complete | 16 (merge pipeline) |
-| 04-03 | 2 | Complete | 10 (lineage tracking) |
-| 04-04 | 3 | Complete | 14 (validation + integration) |
-
-**Total Tests**: 230 (53 new in Phase 4)
-**Commits**: `0b720f9`, `7214c59`, `1159307`
-
-### Phase 4 Verification
-
-| Criteria | Status |
-|----------|--------|
-| `evolution/merge.py` merges LoRA stack to base | Pass (MLX α/r math correct; mergekit uses baked checkpoints) |
-| `evolution/lineage.py` tracks full model history | Pass (register_lora wired into promote_candidate) |
-| `evolution/validation.py` catches bad merges | Pass (fails closed w/o backend; coherence hardened) |
-| Merge failure generates introspection task after N failures | Pass (integration test) |
-| Tests cover merge success, failure, and rollback | Pass (286 tests total) |
-| Daemon queue is restart-safe | Pass (Task 17) |
-| Commits land in target workspace | Pass (Task 16) |
-| Install from source works (`pip install -e .`) | Pass (Task 1) |
-
-### Phase 4 Spec-Fix Branch
-
-After initial Phase 4 close-out, an audit + `/legion:review` surfaced
-5 BLOCKERs and 16 WARNINGs (see
-`.planning/phases/04-weight-evolution/04-REVIEW.md`). All resolved on
-branch `fix/spec-alignment` (22 commits, `2b7128e..339dced`). Test
-suite grew from 230 → 286 tests, all passing. Details in the plan
-`docs/superpowers/plans/2026-04-16-spec-alignment-and-merge-correctness.md`
-and the review doc above.
-
-## Phase 5 Plan Summary
-
-| Plan | Wave | Title | Lead Agent | Secondary |
-|------|------|-------|-----------|-----------|
-| 05-01 | 1 | Autonomy Package + Watchdog | Senior Developer | Infrastructure Maintainer |
-| 05-02 | 2 | Preflight + Acceptance + CLI + Tests | Senior Developer | QA Verification Specialist |
-| 05-03 | 3 | Soak Run + Acceptance Report + Sign-off | QA Verification Specialist | Reality Checker |
-
-### Architecture Selected
-Proposal C (Clean) — new `homunculus/autonomy/` package matching Phase 2/3/4 package pattern. Proposals M/P rejected: M entangles watchdog with daemon state (bad signal separation); P too dense for terminal phase needing clear acceptance surface.
-
-### Spec
-`.planning/specs/05-full-autonomy-spec.md` — 6 success criteria (SC1-SC6) mapped to measurement sources, full data contracts (6 dataclasses), watchdog semantics, CLI contracts, testing strategy.
-
-### Auto-Refine Applied (1 cycle)
-Critical findings fixed:
-- Plan 05-03-1: Throughput pre-check prevents SC3 data-starvation (computes projected LoRA merges over soak window, adjusts thresholds or extends duration)
-- Plan 05-03-1: Explicit wall-clock execution model (daemonize + schedule daily checks + yield); agent does NOT block 7 days
-- Plan 05-02-3: Atomic-persistence test reframed as property-based invariant (not fault injection)
-- Plan 05-01-3: Daemon integration point discovery via grep + minimal helper fallback
-
-## Phase 5 Build Results
-
-| Plan | Wave | Status | Commit | Notes |
-|------|------|--------|--------|-------|
-| 05-01 | 1 | Complete | `a5502e7` | autonomy/ package, 6 dataclasses, reporter, watchdog, daemon integration; 293 tests passing |
-| 05-02 | 2 | Complete | `c27353d` | preflight (7 gates), acceptance (6 criteria), 3 CLI subcommands, 15 new tests (308 total) |
-| 05-03 | 3 | **BLOCKED** | `63ef4d5` | SOAK-PROTOCOL.md written; throughput gate refused start (episodes.jsonl empty → 0 LoRA projection for 7-day window) |
-
-## Phase 5 Blocker — Throughput Gate
-
-Per `.planning/phases/05-full-autonomy/SOAK-PROTOCOL.md` §2.2, QA refused to start the 7-day soak because projected_loras_merged_7d=0.0 would guarantee SC3 failure. Baseline capture in `soak-log/day-00-baseline.json`. Operator options documented in `05-03-SUMMARY.md`:
-
-1. Bootstrap episode history — run 5-10 real episodes manually to populate `traces/episodes.jsonl`, then re-run gate.
-2. Lower `[evolution].auto_train_after_samples` (50→10) AND `auto_merge_after_loras` (5→2) in `homunculus.toml`, then re-run gate.
-3. Combination of both.
-
-After gate clears: re-run `/legion:build` (or invoke the QA agent directly) to start the soak. Session 2 (05-03-2 acceptance report + 05-03-3 sign-off) resumes after ≥7-day wall-clock elapses.
-
-## Next Action
-
-Portable soak kickoff built (commit `311c1be`). Target PC workflow documented in `scripts/phase5/README.md`:
-
-```
-git clone <repo> && cd homunculus
-python -m venv .venv && .\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-python -m unittest discover -q     # expect: Ran 308 tests ... OK
-
-.\scripts\phase5\setup.ps1         # ollama install/serve + pull 14B + env
-.\scripts\phase5\bootstrap.ps1     # 10 seed episodes -> populates traces/
-.\scripts\phase5\precheck.ps1      # sanity-check throughput gate
-.\scripts\phase5\start-soak.ps1    # branch + preflight + daemon detached + daily task
-
-# wait >=7 days
-
-.\scripts\phase5\stop-soak.ps1
-python -m homunculus.cli autonomy-accept --config homunculus.toml \
-  --soak-log .planning\phases\05-full-autonomy\soak-log \
-  --soak-branch phase-5/soak-YYYYMMDD \
-  --output .planning\phases\05-full-autonomy\05-ACCEPTANCE.md
-```
-
-Session 2 (invokes 05-03-2 acceptance predicate audit + 05-03-3 ROADMAP/STATE sign-off) runs AFTER soak completes. Resume via new `/legion:build --phase 5` session.
+`.planning/` directory retained for historical reference. PROJECT.md and ROADMAP.md frozen at archive time. New work should not update these files.

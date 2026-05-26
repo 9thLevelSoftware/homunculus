@@ -1,0 +1,3 @@
+{"type": "assess", "episode_id": "c4d13c212cf24cd4946f2ad42ff601cb", "task_id": "9TH-13", "workspace": "symphony", "timestamp": "2026-04-29T02:08:49+00:00"}
+{"type": "preflight", "episode_id": "c4d13c212cf24cd4946f2ad42ff601cb", "task_id": "9TH-13", "head": "590ee311259f9ba0b590028fa13ba8dba2470bed", "timestamp": "2026-04-29T02:08:49+00:00"}
+{"type": "episode_failed", "episode_id": "c4d13c212cf24cd4946f2ad42ff601cb", "task_id": "9TH-13", "failure_stage": "recall", "error_type": "RuntimeError", "error_message": "Engram request failed: <urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>", "timestamp": "2026-04-29T02:08:54+00:00"}

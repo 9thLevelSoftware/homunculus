@@ -64,3 +64,4 @@ The agent itself. Homunculus operates on its own codebase — it is both the too
 
 ---
 *Last updated: 2026-04-15 after Phase 0 completion*
+*Archived: 2026-04-29 — Legion phased roadmap superseded by Symphony orchestration*

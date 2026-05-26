@@ -9,6 +9,8 @@ This directory is the repository-local source of truth for agents and operators.
   adapted from OpenAI's harness engineering article.
 - [Architecture and Artifacts](architecture.md) - implemented runtime structure,
   lifecycle, persisted records, and safety boundaries.
+- [Technical Architecture Reference](technical-architecture.md) - onboarding
+  reference for runtime planes, flows, interfaces, and integrations.
 - [Operator Guide](operator-guide.md) - daily commands, autonomous runs, reporting,
   recovery, and acceptance.
 - [Setup and Configuration](setup-and-configuration.md) - TOML sections,

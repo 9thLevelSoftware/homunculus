@@ -33,7 +33,7 @@ class WorkspaceManager:
         source = self.config.homunculus.source_workspace
         workspace_key = sanitize_workspace_key(issue.identifier)
         workspace_path = self.config.workspace.root / workspace_key
-        branch_name = issue.branch_name or branch_name_for_issue(issue, self.config)
+        branch_name = self._branch_name(issue)
 
         self._require_git_repo(source)
         self._require_clean(source)
@@ -56,12 +56,42 @@ class WorkspaceManager:
             created_now = True
         else:
             self._require_git_repo(workspace_path)
+            current_branch = self._run_git(
+                workspace_path, ["branch", "--show-current"], check=True
+            ).stdout.strip()
+            if current_branch != branch_name:
+                self._require_clean(workspace_path)
+                self.remove_workspace(
+                    WorkspaceRecord(
+                        path=workspace_path.resolve(),
+                        workspace_key=workspace_key,
+                        branch_name=current_branch,
+                    )
+                )
+                self._run_git(
+                    source,
+                    [
+                        "worktree",
+                        "add",
+                        "-B",
+                        branch_name,
+                        str(workspace_path),
+                        self.config.homunculus.base_branch,
+                    ],
+                    check=True,
+                )
+                created_now = True
         return WorkspaceRecord(
             path=workspace_path.resolve(),
             workspace_key=workspace_key,
             branch_name=branch_name,
             created_now=created_now,
         )
+
+    def _branch_name(self, issue: IssueRecord) -> str:
+        if issue.branch_name and issue.branch_name.startswith(self.config.homunculus.branch_prefix):
+            return issue.branch_name
+        return branch_name_for_issue(issue, self.config)
 
     def remove_workspace(self, workspace: WorkspaceRecord) -> None:
         source = self.config.homunculus.source_workspace
